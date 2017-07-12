@@ -26,7 +26,7 @@ import java.util.*;
 public class ThresholdsProfilingTests  extends BaseNd4jTest {
     protected int[] thresholds = new int[]{1, 1024, 2048, 8192, 16384, 65536, 131072, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432};
     protected List<int[]> shapes = Arrays.asList(new int[]{100, 100}, new int[]{1000, 1000}, new int[]{2500, 2500}, new int[]{5000, 5000}); //, new int[]{10000, 10000});
-    protected int NUM_ARRAYS = 10;
+    protected int NUM_ARRAYS = 1;
     protected int NUM_TRIES = 500;
     protected int NUM_WARM = 500;
 
@@ -77,9 +77,52 @@ public class ThresholdsProfilingTests  extends BaseNd4jTest {
 
                 for (int t = 0; t < NUM_TRIES; t++) {
                     int opIdx = t % NUM_ARRAYS;
+                    INDArray x = X.get(opIdx).dup();
 
                     long time1 = System.nanoTime();
-                    X.get(opIdx).addi(1.0f);
+                    x.muli(1.0f);
+                    long time2 = System.nanoTime();
+                    times.add(time2 - time1);
+                    avg += (time2 - time1);
+                }
+
+                avg /= NUM_TRIES;
+                Collections.sort(times);
+
+                log.info("Shape: {}; Threshold: {}; Average: {} us; p50: {} us", Arrays.toString(shape), threshold, avg / 1000, times.get(times.size() / 2) / 1000);
+            }
+        }
+    }
+
+    @Test
+    public void testPairwiseThresholds1() throws Exception {
+        // this test is irrelevant on CUDA :(
+        if (Nd4j.getExecutioner().getClass().getCanonicalName().toLowerCase().contains("cuda"))
+            return;
+
+        log.info("*********************** PAIRWISE {}", Nd4j.dataType());
+
+        for (int[] shape: shapes) {
+            List<INDArray> X = new ArrayList<>();
+            List<INDArray> Y = new ArrayList<>();
+            for (int i = 0; i < NUM_ARRAYS; i++) {
+                X.add(Nd4j.rand(shape));
+                Y.add(Nd4j.rand(shape));
+            }
+
+            for (int threshold: thresholds) {
+                List<Long> times = new ArrayList<>();
+                long avg = 0;
+
+                NativeOpsHolder.getInstance().getDeviceNativeOps().setElementThreshold(threshold);
+
+                for (int t = 0; t < NUM_TRIES; t++) {
+                    int opIdx = t % NUM_ARRAYS;
+                    INDArray x = X.get(opIdx).dup();
+                    INDArray y = X.get(opIdx).dup();
+
+                    long time1 = System.nanoTime();
+                    x.addi(y);
                     long time2 = System.nanoTime();
                     times.add(time2 - time1);
                     avg += (time2 - time1);
