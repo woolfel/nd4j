@@ -535,7 +535,7 @@ Suppose this was executed on a 3x3 input array. Visually, this argmax/IAMax oper
 
 ![Argmax / IAMax](../img/argmax_dim0.png)
 
-As with the accumulation op described above, the output has shape `[1,3]`. Again, had we instead done the operation along dimension 1, we would get a column vector with shape `[3,1]`, with values `(2,0,2)`.
+As with the accumulation op described above, the output has shape `[1,3]`. Again, had we instead done the operation along dimension 1, we would get a column vector with shape `[3,1]`, with values `(1,0,2)`.
 
 
 ### <a name="opsbroadcast">Broadcast and Vector Ops</a>
