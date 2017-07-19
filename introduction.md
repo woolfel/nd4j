@@ -90,9 +90,8 @@ INDArray nd3 = Nd4j.create(new float[]{5,6},new int[]{2}); //vector as row
 ```
 Notice that the shape of the two vectors is specified with their final parameters. {2,1} means the vector is vertical, with elements populating two rows and one column. A simple {2} means the vector populates along a single row that spans two columns -- horizontal. You're first matrix will look like this
 ```java
-[[1.0 ,3.0]
- [2.0 ,4.0]
-]
+[[1.00, 2.00],
+ [3.00, 4.00]]
 ```
 Here's how you add a column vector to a matrix:
 
@@ -100,8 +99,8 @@ Here's how you add a column vector to a matrix:
 
 And here's the best way to visualize what's happening. The top element of the column vector combines with the top elements of each column in the matrix, and so forth. The sum matrix represents the march of that column vector across the matrix from left to right, adding itself along the way.
 ```java
-[1.0 ,3.0]     [5.0]    [6.0 ,8.0]
-[2.0 ,4.0]  +  [6.0] =  [8.0 ,10.0]
+[1.0 ,2.0]     [5.0]    [6.0 ,7.0]
+[3.0 ,4.0]  +  [6.0] =  [9.0 ,10.0]
 ```
 But let's say you preserved the initial matrix and instead added a row vector.
 ```java
@@ -109,8 +108,8 @@ nd.addRowVector(nd3);
 ```
 Then your equation is best visualized like this:
 ```java
-[1.0 ,3.0]                   [6.0 ,9.0]
-[2.0 ,4.0]  +  [5.0 ,6.0] =  [7.0 ,10.0]
+[1.0 ,2.0]                   [6.0 ,8.0]
+[3.0 ,4.0]  +  [5.0 ,6.0] =  [8.0 ,10.0]
 ```
 In this case, the leftmost element of the row vector combines with the leftmost elements of each row in the matrix, and so forth. The sum matrix represents that row vector falling down the matrix from top to bottom, adding itself at each level.
 
