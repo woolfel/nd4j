@@ -1364,7 +1364,7 @@ public class NativeOpExecutioner extends DefaultOpExecutioner {
         float threshold = buffer.getInt(2);
 
         if (decodeCounter.incrementAndGet() % 100 == 0) {
-            log.info("Compression ratio: {}", compressedLength * 100 / originalLength);
+            log.info("Compression efficiency: {}%",String.format("%.02f", 100.0 - (compressedLength * 100 / originalLength)));
         }
 
         if (target.lengthLong() != originalLength)
