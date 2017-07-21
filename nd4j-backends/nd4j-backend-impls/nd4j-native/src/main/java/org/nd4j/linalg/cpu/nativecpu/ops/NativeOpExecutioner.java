@@ -36,6 +36,7 @@ import org.nd4j.nativeblas.NativeOpsHolder;
 import org.nd4j.nativeblas.Nd4jBlas;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 
 /**
@@ -56,6 +57,10 @@ public class NativeOpExecutioner extends DefaultOpExecutioner {
     private static final String VERBOSE = "ND4J_VERBOSE";
 
     protected ThreadLocal<PointerPointer> extraz = new ThreadLocal<>();
+
+    protected AtomicLong decodeCounter = new AtomicLong(0);
+    protected AtomicLong encSize = new AtomicLong(0);
+    protected AtomicLong decSize = new AtomicLong(0);
 
     /**
      * Instead of allocating new memory chunks for each batch invocation, we reuse them on thread/opNum basis
@@ -1357,6 +1362,10 @@ public class NativeOpExecutioner extends DefaultOpExecutioner {
         long compressedLength = buffer.getInt(0);
         long originalLength = buffer.getInt(1);
         float threshold = buffer.getInt(2);
+
+        if (decodeCounter.incrementAndGet() % 100 == 0) {
+            log.info("Compression ratio: {}", compressedLength * 100 / originalLength);
+        }
 
         if (target.lengthLong() != originalLength)
             throw new ND4JIllegalStateException("originalLength ["+ originalLength+"] stored in encoded array doesn't match target length ["+ target.lengthLong()+"]");
