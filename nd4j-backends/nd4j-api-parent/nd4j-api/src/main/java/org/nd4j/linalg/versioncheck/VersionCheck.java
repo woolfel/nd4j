@@ -1,12 +1,14 @@
 package org.nd4j.linalg.versioncheck;
 
 import lombok.extern.slf4j.Slf4j;
-import org.nd4j.linalg.factory.Nd4j;
 
 import java.util.*;
 
 /**
- * Created by Alex on 03/08/2017.
+ * Utility to check versions of dependencies (DL4J, ND4J etc) to detect and warn
+ * that (likely) incompatible versions are present on the classpath
+ *
+ * @author Alex Black
  */
 @Slf4j
 public class VersionCheck {
@@ -55,7 +57,7 @@ public class VersionCheck {
         //Check for 0.9.0 or earlier of: DataVec, nd4j-native, nd4j-cuda, DL4J
         //We know if the specified classes exist, and the version info class doesn't, it must be
         // a 0.9.0 or earlier version
-        //This isn't the most elegant solution, but it should work
+        //This isn't a particularly elegant solution, but it should work
 
 
         String datavecClass = "org.datavec.api.writable.DoubleWritable";    //Arbitrary class that should have been stable
@@ -99,15 +101,15 @@ public class VersionCheck {
     }
 
     public static void logVersions(){
-        ServiceLoader<VersionInfo> sl = ServiceLoader.load(VersionInfo.class);
-        Iterator<VersionInfo> iter = sl.iterator();
-
         List<VersionInfo> l = getVersionInfo();
 
         log.info("Found {} artifacts registered for ND4J version check", l.size());
 
         for(VersionInfo vi : l ){
             log.info(vi.getGAV());
+        }
+        for(String s : legacyVersionsPresent()){
+            log.info(s);
         }
     }
 
