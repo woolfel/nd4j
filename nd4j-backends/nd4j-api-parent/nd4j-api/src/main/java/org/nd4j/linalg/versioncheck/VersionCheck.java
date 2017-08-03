@@ -66,7 +66,7 @@ public class VersionCheck {
 
         String dl4jClass = "org.deeplearning4j.nn.conf.MultiLayerConfiguration";
         String dl4jVersionInfoClass = "org.deeplearning4j.versioninfo.Dl4jNnVersionInfo";
-        boolean oldDl4jVersion = checkOldVersion(dl4jClass, datavecVersionInfoClass);
+        boolean oldDl4jVersion = checkOldVersion(dl4jClass, dl4jVersionInfoClass);
 
         //TODO: Arbiter, RL4J
 
