@@ -17,6 +17,7 @@ package org.nd4j.nativeblas;
 
 import org.bytedeco.javacpp.annotation.Platform;
 import org.bytedeco.javacpp.annotation.Properties;
+import org.bytedeco.javacpp.presets.openblas;
 import org.bytedeco.javacpp.tools.Info;
 import org.bytedeco.javacpp.tools.InfoMap;
 import org.bytedeco.javacpp.tools.InfoMapper;
@@ -25,7 +26,7 @@ import org.bytedeco.javacpp.tools.InfoMapper;
  *
  * @author saudet
  */
-@Properties(target = "org.nd4j.nativeblas.Nd4jCpu",
+@Properties(inherit = openblas.class, target = "org.nd4j.nativeblas.Nd4jCpu",
                 value = {@Platform(include = "NativeOps.h", compiler = "cpp11", library = "jnind4jcpu",
                                 link = "nd4jcpu", preload = "libnd4jcpu"),
                                 @Platform(value = "linux", preload = "gomp@.1",

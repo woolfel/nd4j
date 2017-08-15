@@ -137,6 +137,17 @@
                         <artifactId>nd4j-native-api</artifactId>
                         <version>${project.version}</version>
                     </dependency>
+                    <dependency>
+                        <groupId>org.bytedeco.javacpp-presets</groupId>
+                        <artifactId>openblas</artifactId>
+                        <version>${openblas.version}-${javacpp-presets.version}</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.bytedeco.javacpp-presets</groupId>
+                        <artifactId>openblas</artifactId>
+                        <version>${openblas.version}-${javacpp-presets.version}</version>
+                        <classifier>${dependency.platform}</classifier>
+                    </dependency>
                 </dependencies>
                 <configuration>
                     <properties>${javacpp.platform}</properties>
@@ -159,8 +170,34 @@
                         <includePath>${env.LIBND4J_HOME}/include/cnpy</includePath>
                     </includePaths>
                     <linkPath>${env.LIBND4J_HOME}/blasbuild/cpu/blas</linkPath>
+                    <buildResources>
+                        <buildResource>/org/bytedeco/javacpp/${javacpp.platform}/</buildResource>
+                    </buildResources>
+                    <includeResources>
+                        <includeResource>/org/bytedeco/javacpp/${javacpp.platform}/include/</includeResource>
+                    </includeResources>
+                    <linkResources>
+                        <linkResource>/org/bytedeco/javacpp/${javacpp.platform}/lib/</linkResource>
+                    </linkResources>
                 </configuration>
                 <executions>
+                    <execution>
+                        <id>javacpp.cppbuild</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>build</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${javacpp.cppbuild.skip}</skip>
+                            <buildCommand>
+                                <program>bash</program>
+                                <argument>${env.LIBND4J_HOME}/buildnativeoperations.sh</argument>
+                                <argument>-platform</argument>
+                                <argument>${javacpp.platform}</argument>
+                            </buildCommand>
+                            <workingDirectory>${env.LIBND4J_HOME}</workingDirectory>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>javacpp.parser</id>
                         <phase>generate-sources</phase>
