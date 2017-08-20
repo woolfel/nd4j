@@ -469,15 +469,15 @@ ND4J currently allows INDArrays to be backed by either float or double-precision
 For 0.4-rc3.8 and earlier:
 
 ```
-	Nd4j.dtype = DataBuffer.Type.DOUBLE;
+    Nd4j.dtype = DataBuffer.Type.DOUBLE;
     NDArrayFactory factory = Nd4j.factory();
     factory.setDType(DataBuffer.Type.DOUBLE);
 ```
 
-For 0.4-rc3.9 and later:
+For 0.9 and later:
 
 ```
-	DataTypeUtil.setDTypeForContext(DataBuffer.Type.DOUBLE);
+    DataTypeUtil.setDTypeForContext(DataBuffer.Type.DOUBLE);
 ```
 
 

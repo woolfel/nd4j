@@ -97,9 +97,9 @@ CPU를 위한 기본 백엔드는 `native` 이며, 이는 Netlib-blas에 강력�
 ```
 ND4J의 버전이 여기에서 변수입니다. 이는 POM에서 다른 상위 라인을 참조할 것이며, `<properties> ... </properties>` 섹션에 있는 nd4j의 버전을 보여주고 다음과 비슷하게 보여질 것 입니다:
 ```xml
-<nd4j.version>0.4-rc3.10</nd4j.version>
+<nd4j.version>0.9.1</nd4j.version>
 ```
-dl4j의 버전 역시 0.4-rc3.10이고, Canova의 버전은 0.0.0.13 입니다.
+dl4j의 버전 역시 0.9.1이고, Canova의 버전은 0.0.0.13 입니다.
 
 저희가 새로운 릴리스를 사용하면 버전의 숫자는 달라질 수 있습니다. [Maven Central에서 최신 버전을 반드시 확인하십시오]( https://search.maven.org/#search%7Cga%7C1%7Cnd4j). 여러분이 적절한 디펜던시와 nd4j 버전에 붙여 넣었다면, Maven은 자동으로 필요한 라이브러리들을 설치하고, 여러분은 ND4J을 실행하실 수 있어야 합니다.
 
@@ -148,11 +148,11 @@ Deeplearning4j 버전들은 POM의 속성(properties) 섹션에 하드 코딩된
 
 핵심 디펜던시 뿐만 아니라, 아래에 보여진 것과 같이, 여러분은 또한 커맨드 라인 인터페이스를 위한 deeplearning4j-cli를, Hadoop 또는 Spark 상의 병렬 실행을 위한 deeplearning4j-scaleout, 혹은 다른 것들을 필요에 따라 설치하실 수 있습니다.
 ```xml
-		<dependency>
-		  <groupId>org.deeplearning4j</groupId>
-		  <artifactId>deeplearning4j-core</artifactId>
-		  <version>${deeplearning4j.version}</version>
-		</dependency>
+        <dependency>
+          <groupId>org.deeplearning4j</groupId>
+          <artifactId>deeplearning4j-core</artifactId>
+          <version>${deeplearning4j.version}</version>
+        </dependency>
 ```
 Deeplearning4j 설치에 대한 더 많은 정보는 [Getting Started page](http://deeplearning4j.org/kr-gettingstarted.html)에서 가능합니다.
 
@@ -181,8 +181,8 @@ sudo cp libopenblas.so libblas.so.3
 * make FC=gfortran
 * sudo make PREFIX=/usr/local/ install
 * Linux라면, libblas.so.3 와 liblapack.so.3 를 위한 symlink들이 여러분의 LD_LIBRARY_PATH 어딘가에 보여지는지 재확인하시기 바랍니다. 만약 보이지 않는다면, 그 symlink들을 /usr/lib에 추가하십시오. Symlink는 “symbolic link” 입니다. 여러분께서 다음과 같이 설정하실 수 있습니다. (-s 가 그 link를 symbolic하게 합니다.):
-	ln -s TARGET LINK_NAME
-	// interpretation: ln -s "to-here" <- "from-here"
+    ln -s TARGET LINK_NAME
+    // interpretation: ln -s "to-here" <- "from-here"
 * 위의 “from-here”는 아직 존재하지 않지만, 여러분이 생성하실 symbolic link 입니다. [symlink를 생성하는 방법](https://stackoverflow.com/questions/1951742/how-to-symlink-a-file-in-linux)에 StackOverflow 가 있습니다. 또한 여기에 [Linux 페이지](http://linux.die.net/man/1/ln)가 있습니다.
 * 마지막 단계로 여러분의 IDE를 재시작 하십시오.
 * Centos 6와 함께 네이티브 Blas 작동하는 방법을 위한 전체 설명을 원하시면, [이 페이지를 보시기 바랍니다](https://gist.github.com/jarutis/912e2a4693accee42a94).
@@ -214,9 +214,9 @@ C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin
 * Visual Studio 2015를 실행하고 경로 변수를 설정한 후, 환경 변수들 (INCLUDE, LIB, LIBPATH)을 설정하기 위해서 아마도 vcvars32.bat을 실행할 필요가 있을 것이고, 이로 인해 여러분은 header 파일들을 복사하실 필요가 없습니다. 하지만 만약 익스플로러로부터 bat 파일을 실행하시면, 그 설정들이 일시적이므로 제대로 설정되지 않았을 것 입니다. 그러므로  mvn install과 같이 그 동일한 CMD 창에서vcvars32.bat를 실행하시면, 모든 환경 변수들이 올바르게 설정될 것 입니다.
 * 그들이 어떻게 설정되어야 하는지가 여기에 있습니다:
 
-	INCLUDE = C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\include
-	LIB = "C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\lib"
-	//so you can link to .lib files^^
+    INCLUDE = C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\include
+    LIB = "C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\lib"
+    //so you can link to .lib files^^
 
 * Visual Studio에서, 여러분은 또한 C++를 클릭하셔야 합니다. 이는 더 이상 기본적으로 설정되지 않습니다. (추가적으로, Java CPP를 위한 이 include 경로가 항상 윈도우 상에서 작동하지는 않습니다. 한가지 해결 방법은 header 파일들을 Visual Studio 의 include 디렉터리에서 가져와 Java가 설치된 곳인 Java Run-Time Environment (JRE)의 include디렉터리에 넣는 것 입니다. 이는 standardio.h와 같은 파일들에 영향을 미칠 것 입니다.
 * Git, IntelliJ 및 Maven과의 예제들을 설치하는 연습을 위해서는 저희의 [Quickstart 페이지](http://deeplearning4j.org/quickstart.html#walk)를 봐 주십시오.
