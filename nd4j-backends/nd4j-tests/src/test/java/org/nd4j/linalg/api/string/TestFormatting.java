@@ -49,6 +49,16 @@ public class TestFormatting extends BaseNd4jTest {
 
     }
 
+    @Test
+    public void testIfColVecPrintsProperly() {
+        INDArray colVec = Nd4j.linspace(1,10,10).reshape(10,1);
+        INDArray arrWithCol = Nd4j.linspace(1,15,15).reshape('f',3,5,1);
+        INDArray someArr = Nd4j.linspace(1,100,100).reshape(2,5,5,2); //unchanged
+        System.out.println(colVec+"\n==========\n");
+        System.out.println(arrWithCol+"\n==========\n");
+        System.out.println(someArr);
+    }
+
     @Override
     public char ordering() {
         return 'f';

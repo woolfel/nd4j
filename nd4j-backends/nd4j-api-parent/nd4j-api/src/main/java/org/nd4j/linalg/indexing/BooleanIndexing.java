@@ -253,8 +253,9 @@ public class BooleanIndexing {
     }
 
     /**
-     * This method does element-wise assing for 2 equal-sized matrices, for each element that matches Condition
-     *
+     * This method does element-wise assigning for 2 equal-sized matrices, for each element that matches Condition
+     * In other words elements that satisfy the condition in the "to" array are overwritten with their corresponding
+     * values from the "from" array
      * @param to
      * @param from
      * @param condition

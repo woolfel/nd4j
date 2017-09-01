@@ -15,6 +15,7 @@ import java.text.NumberFormat;
 public class NDArrayStrings {
 
     private String sep = ",";
+    private String higherDimSep = ",";
     private int padding = 0;
 
     private String decFormatNum = "#,###,##0";
@@ -55,6 +56,7 @@ public class NDArrayStrings {
     public NDArrayStrings(String sep, int precision, String decFormat,boolean commas) {
         this.decFormatNum = decFormat;
         this.sep = sep;
+        this.higherDimSep = sep;
         if (precision != 0) {
             this.decFormatRest = ".";
             while (precision > 0) {
@@ -63,7 +65,9 @@ public class NDArrayStrings {
             }
         }
 
-        this.decimalFormat = new DecimalFormat(decFormatNum + decFormatRest);
+        String handleNegAlso = " " + decFormatNum + decFormatRest +  ";" + "-" + decFormatNum + decFormatRest;
+
+        this.decimalFormat = new DecimalFormat(handleNegAlso);
         DecimalFormatSymbols sepNgroup = DecimalFormatSymbols.getInstance();
         sepNgroup.setDecimalSeparator('.');
         if(!commas) {
@@ -88,6 +92,9 @@ public class NDArrayStrings {
     public String format(INDArray arr) {
         String padding = decimalFormat.format(3.0000);
         this.padding = padding.length();
+        if (arr.size(arr.rank()-2) > 1 && arr.size(arr.rank()-1) == 1) {
+            this.sep += "\n";
+        }
         return format(arr, arr.rank());
     }
 
@@ -126,7 +133,7 @@ public class NDArrayStrings {
             for (int i = 0; i < arr.slices(); i++) {
                 sb.append(format(arr.slice(i), rank - 1, offset));
                 if (i != arr.slices() - 1) {
-                    sb.append(sep + " \n");
+                    sb.append(higherDimSep + " \n");
                     sb.append(StringUtils.repeat("\n", rank - 2));
                     sb.append(StringUtils.repeat(" ", offset));
                 }
