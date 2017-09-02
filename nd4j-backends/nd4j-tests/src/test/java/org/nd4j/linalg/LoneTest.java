@@ -248,4 +248,14 @@ public class LoneTest extends BaseNd4jTest {
         //multiplication of arrays of different rank should throw exception
         INDArray C = A.mul(B);
     }
+
+    @Test
+    public void testClip() {
+        INDArray A = Nd4j.linspace(1,24,24).reshape(2,3,4);
+        INDArray expected = Nd4j.valueArrayOf(A.shape(),12);
+        expected.tensorAlongDimension(0,1,2).muli(0).addi(Nd4j.linspace(1,12,12).reshape(3,4));
+        expected.putScalar(0,0,0,2);
+        Nd4j.clip(A,2,12);
+        assertEquals(expected,A);
+    }
 }

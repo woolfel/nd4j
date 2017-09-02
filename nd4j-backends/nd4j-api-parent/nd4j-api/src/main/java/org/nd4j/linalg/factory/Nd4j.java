@@ -26,15 +26,11 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.LineIterator;
 import org.apache.commons.lang3.ArrayUtils;
-import org.nd4j.linalg.primitives.Pair;
 import org.bytedeco.javacpp.DoublePointer;
 import org.bytedeco.javacpp.FloatPointer;
 import org.bytedeco.javacpp.IntPointer;
 import org.bytedeco.javacpp.Pointer;
-import org.bytedeco.javacpp.indexer.DoubleRawIndexer;
-import org.bytedeco.javacpp.indexer.FloatRawIndexer;
 import org.bytedeco.javacpp.indexer.Indexer;
-import org.bytedeco.javacpp.indexer.IntRawIndexer;
 import org.nd4j.context.Nd4jContext;
 import org.nd4j.linalg.api.buffer.DataBuffer;
 import org.nd4j.linalg.api.buffer.factory.DataBufferFactory;
@@ -78,11 +74,13 @@ import org.nd4j.linalg.exception.ND4JIllegalStateException;
 import org.nd4j.linalg.factory.Nd4jBackend.NoAvailableBackendException;
 import org.nd4j.linalg.fft.DefaultFFTInstance;
 import org.nd4j.linalg.fft.FFTInstance;
+import org.nd4j.linalg.indexing.BooleanIndexing;
 import org.nd4j.linalg.indexing.INDArrayIndex;
 import org.nd4j.linalg.indexing.NDArrayIndex;
+import org.nd4j.linalg.indexing.conditions.Conditions;
 import org.nd4j.linalg.memory.BasicMemoryManager;
 import org.nd4j.linalg.memory.MemoryManager;
-import org.nd4j.linalg.memory.provider.BasicWorkspaceManager;
+import org.nd4j.linalg.primitives.Pair;
 import org.nd4j.linalg.string.NDArrayStrings;
 import org.nd4j.linalg.util.ArrayUtil;
 import org.nd4j.versioncheck.VersionCheck;
@@ -2621,6 +2619,21 @@ public class Nd4j {
     public static void clearNans(INDArray arr) {
         //BooleanIndexing.applyWhere(arr, Conditions.isNan(), new Value(Nd4j.EPS_THRESHOLD));
         getExecutioner().exec(new ReplaceNans(arr, Nd4j.EPS_THRESHOLD));
+    }
+
+    /**
+     * Clip values in an ndarray to be within the given range
+     *
+     * @param arr Array to clip to given range [min,max]
+     * @param max Values in arr that are greater than max will be rounded down to max
+     * @param min Values in arr that are less than min will be rounded up to min
+     */
+    public static void clip(INDArray arr, double min, double max) {
+        if (!(min < max)) {
+            throw new IllegalArgumentException("Min value specified has to less than the specified max value");
+        }
+        BooleanIndexing.replaceWhere(arr, min, Conditions.lessThan(min));
+        BooleanIndexing.replaceWhere(arr, max, Conditions.greaterThan(max));
     }
 
     /**
