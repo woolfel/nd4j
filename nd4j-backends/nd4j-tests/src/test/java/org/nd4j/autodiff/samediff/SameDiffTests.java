@@ -5,9 +5,9 @@ import org.nd4j.autodiff.functions.DifferentialFunction;
 import org.nd4j.autodiff.graph.Graph;
 import org.nd4j.autodiff.graph.api.Edge;
 import org.nd4j.autodiff.graph.api.Vertex;
+import org.nd4j.autodiff.opstate.OpExecAction;
 import org.nd4j.autodiff.opstate.OpExecOrder;
 import org.nd4j.autodiff.opstate.OpState;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
 import org.nd4j.linalg.api.buffer.DataBuffer;
 import org.nd4j.linalg.api.buffer.util.DataTypeUtil;
 import org.nd4j.linalg.api.ndarray.INDArray;
@@ -27,6 +27,7 @@ import org.nd4j.weightinit.impl.ZeroInitScheme;
 import java.util.*;
 
 import static org.junit.Assert.*;
+import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeNotNull;
 
 /**
@@ -80,14 +81,14 @@ public class SameDiffTests {
         assertEquals(1, sameDiff.graph().getEdges().size());
         assertArrayEquals(arr.shape(), sigmoid.getShape());
         assertEquals(1, sameDiff.graph()
-                .getVertexInDegree(sigmoid.getDifferentialFunction().getVertexId()));
-        int[][] sorted = new int[][]{x.getVertexId(), sigmoid.getDifferentialFunction().getVertexId()};
-        assertArrayEquals(sorted, sameDiff.graph().topologicalSort());
+                .getVertexInDegree(sigmoid.getVertexId()));
+        int[][] sorted = new int[][]{x.getVertexId(), sigmoid.getVertexId()};
+        int[][] topoSortResult= sameDiff.graph().topologicalSort();
+        assertArrayEquals(sorted, topoSortResult);
         assertEquals(1, sameDiff.graph().getOpOrder().getActions().size());
         OpState opState = sameDiff.graph().getOpOrder().getActions().get(0).getOpState();
         assertEquals("sigmoid", opState.getOpName());
-        sameDiff.allocate();
-        Op op = (Op) sameDiff.createOp(Op.Type.TRANSFORM, sameDiff.graph().getOpOrder().getActions().get(0));
+        Op op = (Op) sameDiff.createOp(sameDiff.graph().getOpOrder().getActions().get(0));
         assertTrue(op instanceof Sigmoid);
         Nd4j.getExecutioner().exec(op);
         assertEquals(Transforms.sigmoid(Nd4j.linspace(1, 4, 4)), op.z());
@@ -102,7 +103,8 @@ public class SameDiffTests {
         assertEquals(2, sameDiff.graph().numVertices());
         assertEquals(1, sameDiff.graph().getEdges().size());
         assertArrayEquals(arr.shape(), result.getShape());
-        assertArrayEquals(new int[][]{{1, 2}}, sameDiff.graph().topologicalSort());
+        int[][] topoSortResult = sameDiff.graph().topologicalSort();
+        assertArrayEquals(new int[][]{{1},{2}}, topoSortResult);
     }
 
     @Test
@@ -136,18 +138,12 @@ public class SameDiffTests {
         SameDiff sameDiff = SameDiff.create();
         DynamicCustomOp dynamicCustomOp = DynamicCustomOp.
                 sameDiffBuilder("testop",sameDiff)
-                .addInputs(SDVariable.builder().sameDiff(sameDiff)
-                                .varName("i1")
-                                .shape(new int[]{2,2}).build(),
-                        SDVariable.builder().
-                                sameDiff(sameDiff)
-                                .varName("i2").
-                                shape(new int[]{2,2})
-                                .build())
+                .addInputs(sameDiff.var("i1",new int[]{2,2}),
+                        sameDiff.var("i2",new int[]{2,2}))
                 .addOutputShape(new int[]{2,2})
                 .addOutputShape(new int[]{2,3})
                 .build();
-        assertEquals(2,dynamicCustomOp.getOutputs().length);
+        assertEquals(2,dynamicCustomOp.getOutputFunctions().length);
 
 
     }
@@ -164,7 +160,7 @@ public class SameDiffTests {
         SDVariable result = sameDiff.cosineSimilarity(x, y, 1);
         SDVariable addResult = result.add(result);
 
-        assertEquals(5, sameDiff.graph().numVertices());
+        assertEquals(4, sameDiff.graph().numVertices());
         assertArrayEquals(new int[]{1, 2}, result.getShape());
     }
 
@@ -176,10 +172,10 @@ public class SameDiffTests {
         SDVariable y = sameDiff.var("y", arr);
         SDVariable result = sameDiff.mmul(x, y);
         SDVariable otherResult = result.add(result);
-        //3 vertices and 1 op result
-        assertEquals(5, sameDiff.graph().numVertices()); // XXX: Why 5 instead of 3?
-        //2 edges for matrix multiply and 1 op for result
-        assertEquals(4, sameDiff.graph().getEdges().size()); // XXX: Why 3 instead of 2?
+        //2 inputs and 2 op results
+        assertEquals(4, sameDiff.graph().numVertices());
+        //2 edges for output
+        assertEquals(2, sameDiff.graph().getEdges().size());
         assertArrayEquals(new int[]{2, 2}, result.getShape());
     }
 
@@ -192,18 +188,7 @@ public class SameDiffTests {
         SDVariable y = sameDiff.var("y", arr);
         SDVariable result = sameDiff.mmul(x, y);
         SDVariable otherResult = result.add(result);
-        assertEquals(3, sameDiff.graph().getInputs().size());
-    }
-
-    @Test
-    public void testGetOutputs() {
-        SameDiff sameDiff = SameDiff.create();
-        INDArray arr = Transforms.sigmoid(Nd4j.linspace(1, 4, 4)).reshape(2, 2);
-        SDVariable x = sameDiff.var("x", arr);
-        SDVariable y = sameDiff.var("y", arr);
-        SDVariable result = sameDiff.mmul(x, y);
-        SDVariable otherResult = result.add(result);
-        assertEquals(1, sameDiff.graph().getOutputs().size());
+        assertEquals(2, sameDiff.graph().getInputs().size());
     }
 
     @Test
@@ -242,7 +227,6 @@ public class SameDiffTests {
     public void testCrossSameDiffVariableInitWithAlloc() {
         SameDiff first = SameDiff.create();
         SameDiff second = SameDiff.create();
-        first.allocate();
 
 
         SDVariable firstVar = first.var("one",new int[]{2,2});
@@ -274,7 +258,6 @@ public class SameDiffTests {
     public void testVariableArrayReference() {
         SameDiff sameDiff = SameDiff.create();
         SDVariable arr = sameDiff.var("one",new int[]{2,2});
-        sameDiff.allocate();
         assertArrayEquals(new int[]{2,2},arr.getShape());
         assumeNotNull(arr.getArr());
         assertArrayEquals(new int[]{2,2},arr.getArr().shape());
@@ -325,9 +308,9 @@ public class SameDiffTests {
         SDVariable y = sameDiff.var("y", arr);
         SDVariable result = sameDiff.tensorMmul(x, y, new int[][]{{0}, {1}});
         assertEquals(3, sameDiff.graph().numVertices());
-        assertEquals(2, sameDiff.graph().getEdges().size());
+        assertEquals(1, sameDiff.graph().getEdges().size());
         assertArrayEquals(ArrayUtil.getTensorMmulShape(new int[]{2, 2, 2}, new int[]{2, 2, 2}, new int[][]{{0}, {1}}), result.getShape());
-        assertEquals(32, sameDiff.numElements());
+        assertEquals(48, sameDiff.numElements());
     }
 
     @Test
@@ -433,6 +416,43 @@ public class SameDiffTests {
     }
 
 
+    @Test
+    public void testVariableReferenceNoFunction() {
+        /**
+         * Creating a variable should not create a differential function.
+         */
+        SameDiff sameDiff = SameDiff.create();
+        SDVariable sdVariable = sameDiff.var("one",Nd4j.scalar(1.0));
+        assumeNotNull(sameDiff.getVariableForVertexId(sdVariable.getVertexId()));
+        assertFalse(sameDiff.getFunctionForVertexId(sdVariable.getVertexId()) != null);
+    }
+
+
+    @Test
+    public void testVariableWithFunction() {
+        /**
+         * A variable's function should be null
+         * when just a variable but
+         * have a function result
+         * when the variable itself is the result of a function.
+         *
+         */
+        SameDiff sameDiff = SameDiff.create();
+        SDVariable sdVariable = sameDiff.var("one",Nd4j.scalar(1.0));
+        SDVariable add = sdVariable.add(1.0);
+        assertEquals(sameDiff.getVariableForVertexId(add.getVertexId()),add);
+        assumeFalse(sameDiff.getFunctionForVertexId(sdVariable.getVertexId()) != null);
+    }
+
+
+
+    @Test
+    public void testUpdateVariable() {
+        SameDiff sameDiff = SameDiff.create();
+        SDVariable one = sameDiff.one("one",new int[]{1,1});
+        sameDiff.updateVariableName(one.getVertexId(),"one-diff");
+        assertEquals(one.getArr(),sameDiff.getVariable("one-diff").getArr());
+    }
 
 
     @Test
@@ -556,17 +576,8 @@ public class SameDiffTests {
         SameDiff sameDiff = SameDiff.create();
         String testFunctionName = "testfunction";
         SDVariable[] inputVars = new SDVariable[] {
-                sameDiff.setupFunction(SDVariable.builder().varName("one")
-                        .arr(Nd4j.ones(new int[]{1,1}))
-                        .sameDiff(sameDiff)
-                        .vertexId(new int[]{sameDiff.graph().nextVertexId()})
-                        .build()),
-                sameDiff.setupFunction(SDVariable.builder()
-                        .varName("two")
-                        .arr(Nd4j.zeros(new int[]{1,1}))
-                        .sameDiff(sameDiff)
-                        .vertexId(new int[]{sameDiff.graph().nextVertexId()})
-                        .build()),
+                sameDiff.var("one",new int[]{1,1}),
+                sameDiff.var("two",new int[]{1,1}),
 
         };
 
@@ -579,11 +590,12 @@ public class SameDiffTests {
 
 
         //1 input plus 2 outputs
-        assertEquals(3,functionDef.variables().size());
+        assertEquals(4,functionDef.variables().size());
 
 
 
     }
+
 
     @Test
     public void testWhileLoop() {
@@ -601,21 +613,13 @@ public class SameDiffTests {
                 return new SDVariable[]{variableInputs[0],ret};
             }
         },new SDVariable[] {
-                sameDiff.setupFunction(SDVariable.builder().varName("one")
-                        .arr(Nd4j.ones(new int[]{1,1}))
-                        .sameDiff(sameDiff)
-                        .vertexId(new int[]{sameDiff.graph().nextVertexId()})
-                        .build()),
-                sameDiff.setupFunction(SDVariable.builder()
-                        .varName("two")
-                        .arr(Nd4j.zeros(new int[]{1,1}))
-                        .sameDiff(sameDiff)
-                        .vertexId(new int[]{sameDiff.graph().nextVertexId()})
-                        .build()),
+                sameDiff.one("one",new int[]{1,1}),
+               sameDiff.var("two",new int[]{1,1}),
 
         });
 
         Pair<Map<SDVariable, DifferentialFunction>, List<DifferentialFunction>> exec = sameDiff.exec();
+        assertFalse(exec.getRight().isEmpty());
         While function = (While) exec.getRight().get(exec.getRight().size() - 1);
         assumeNotNull(function.getOutputVars());
         assertEquals(1,function.getNumLooped());
@@ -700,11 +704,7 @@ public class SameDiffTests {
 
         //false body trigger
         SDVariable[] secondInputs = new SDVariable[] {
-                sameDiff.setupFunction(SDVariable.builder().varName("two")
-                        .arr(Nd4j.zeros(new int[]{1,1}))
-                        .sameDiff(sameDiff)
-                        .vertexId(new int[]{sameDiff.graph().nextVertexId()})
-                        .build())
+                sameDiff.setupFunction(sameDiff.var("two",new int[]{1,1}))
 
         };
 
@@ -728,7 +728,7 @@ public class SameDiffTests {
         SDVariable right = sameDiff.var("row",row);
         SDVariable test = left.add(right);
         sameDiff.exec();
-        assertEquals(assertion,test.getArr(true));
+        assertEquals(assertion,test.getArr());
     }
 
     @Test
@@ -762,7 +762,7 @@ public class SameDiffTests {
             activation.execBackwards();
             INDArray wGrad = activation.grad("w").getArr().reshape(vars.get("w").shape());
             vars.get("w").subi(wGrad.mul(lr));
-            System.out.println("Score: " + activation.getVariable("negtotalsum").getArr(true));
+            System.out.println("Score: " + activation.getVariable("negtotalsum").getArr());
         }
 
     }
@@ -932,7 +932,7 @@ public class SameDiffTests {
             }
         });
 
-        SameDiff secondAdd = outer.getSameDiffFunctionInstances().get("secondadd");
+        SameDiff secondAdd = outer.getFunction("secondadd");
         INDArray[] outputs = secondAdd.eval(input);
         INDArray outputsAssertion = Nd4j.valueArrayOf(2, 2.0);
         assertEquals(outputsAssertion, outputs[0]);
@@ -1005,8 +1005,8 @@ public class SameDiffTests {
             }
         }, inputs);
 
-        INDArray assertions = Transforms.softmax(sumInput);
         INDArray executions = sameDiff.execAndEndResult("softmax");
+        INDArray assertions = Transforms.softmax(sumInput.dup());
         assertArrayEquals(sumInput.shape(), executions.shape());
         System.out.println(executions);
         assertEquals(assertions, executions);
@@ -1041,48 +1041,20 @@ public class SameDiffTests {
 
 
     @Test
-    public void testMmulGradientLogistic() {
+    public void testSumGradient() {
         SameDiff sameDiff = SameDiff.create();
-        Map<String,INDArray> inputs = variablesForInput();
-
-        sameDiff.defineFunction("mmulGradient", new SameDiff.SameDiffFunctionDefinition() {
-            @Override
-            public SDVariable[] define(SameDiff sameDiff, Map<String, INDArray> inputs, SDVariable[] variableInputs) {
-                SDVariable input = sameDiff.var("x",inputs.get("x"));
-                SDVariable input2 = sameDiff.var("w",inputs.get("w"));
-                SDVariable exp = sameDiff.mmul("mmul",input,input2);
-                SDVariable sigmoid = sameDiff.sigmoid("sigmoid",exp);
-                SDVariable sum = sameDiff.sum("sum",sigmoid,Integer.MAX_VALUE);
-                return new SDVariable[] {sum};
-            }
-        },inputs);
-
-        Pair<Map<SDVariable, DifferentialFunction>, List<DifferentialFunction>> ops = sameDiff.getFunction("mmulGradient").execBackwards();
-        INDArray wGradAssertion = Nd4j.create(new double[]{0.665,-.5975,0.2525}).reshape(3,1);
-        INDArray mmulGradAssertion = Nd4j.valueArrayOf(4,0.25).reshape(4,1);
-        SDVariable wGrad = sameDiff.getFunction("mmulGradient").grad("w");
-        SDVariable mmulGrad = sameDiff.getFunction("mmulGradient").grad("mmul");
-        assertEquals(wGradAssertion,wGrad.getArr());
-        assertEquals(mmulGradAssertion,mmulGrad.getArr());
-
+        SDVariable twoByTwo = sameDiff.var("initial",Nd4j.linspace(1,4,4).reshape(2,2));
+        SDVariable sum = sameDiff.sum(twoByTwo,Integer.MAX_VALUE);
+        Pair<Map<SDVariable, DifferentialFunction>, List<DifferentialFunction>> execBackwards = sameDiff.execBackwards();
+        SameDiff grad = sameDiff.getFunction("grad");
+        SDVariable gradArr = sameDiff.grad(twoByTwo.getVarName());
+        assertEquals(Nd4j.ones(2,2),gradArr.getArr());
     }
 
 
-    @Test
-    public void testResolveArrayReferences() {
-        SameDiff sameDiff = SameDiff.create();
-        SDVariable var1 = sameDiff.var("x",Nd4j.ones(2));
-        SDVariable var2 = sameDiff.var("y",Nd4j.valueArrayOf(2,3.0));
-        SDVariable result = var1.add(var2);
-        sameDiff.exec();
-        DifferentialFunction resultVarTest = result.getDifferentialFunction();
-        Op op = (Op) resultVarTest;
-        assertEquals(result.getArr(true),op.z());
-        assumeNotNull(sameDiff.getInfoFor(result.getArr(true)));
-        assertEquals(resultVarTest.getResult(),sameDiff.getInfoFor(result.getArr(true)));
+ 
 
 
-    }
 
     @Test
     public void testMmulGradient() {
@@ -1163,6 +1135,16 @@ public class SameDiffTests {
 
 
     @Test
+    public void testDepth() {
+        SameDiff sameDiff = SameDiff.create();
+        SDVariable x = sameDiff.one("one",new int[]{2,2});
+        assertEquals(0,x.depth());
+        SDVariable sigmoid = sameDiff.sigmoid("sigmoid",x);
+        assertEquals(1,sigmoid.depth());
+    }
+
+
+    @Test
     public void testTanhGradient() {
         SameDiff sameDiff = SameDiff.create();
         INDArray sumInput = Nd4j.linspace(1,4,4).reshape(2,2);
@@ -1211,7 +1193,7 @@ public class SameDiffTests {
             }
         },params);
 
-        SameDiff logisticGraph = sameDiff.getSameDiffFunctionInstances().get("rsubop");
+        SameDiff logisticGraph = sameDiff.getFunction("rsubop");
         INDArray[] outputs = logisticGraph.eval(params);
         assertEquals(Nd4j.ones(4).muli(-1),outputs[0]);
         System.out.println(Arrays.toString(outputs));
@@ -1350,7 +1332,7 @@ public class SameDiffTests {
             @Override
             public SDVariable[] define(SameDiff sameDiff, Map<String, INDArray> inputs, SDVariable[] variableInputs) {
                 SDVariable outputs = sameDiffOuter.invokeFunctionOn("logisticPredictions", sameDiff);
-                SDVariable y = sameDiff.getVariableMap().get("y");
+                SDVariable y = sameDiff.getVariable("y");
                 SDVariable outputTimesY = outputs.mul(y);
                 return new SDVariable[]{outputTimesY};
 
@@ -1375,6 +1357,17 @@ public class SameDiffTests {
             }
 
         }
+    }
+
+
+    @Test
+    public void testScalarAdd() {
+        SameDiff sameDiff = SameDiff.create();
+        SDVariable twoByTwo = sameDiff.var("first",Nd4j.linspace(1,4,4).reshape(2,2));
+        SDVariable add = twoByTwo.add(1.0);
+        INDArray test = sameDiff.execAndEndResult();
+        INDArray assertion = Nd4j.linspace(1,4,4).reshape('f',2,2).add(1.0);
+        assertEquals(assertion,test);
     }
 
 

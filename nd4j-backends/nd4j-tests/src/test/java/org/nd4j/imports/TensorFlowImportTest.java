@@ -7,21 +7,16 @@ import org.junit.Test;
 import org.nd4j.autodiff.opstate.OpExecAction;
 import org.nd4j.autodiff.opstate.OpState;
 import org.nd4j.autodiff.samediff.SameDiff;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
+import org.nd4j.autodiff.samediff.SDVariable;
 import org.nd4j.graph.intermediate.TIndex;
 import org.nd4j.imports.converters.TensorFlowMapper;
-import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.Op;
 import org.nd4j.linalg.factory.Nd4j;
-import org.nd4j.linalg.indexing.NDArrayIndex;
 import org.nd4j.linalg.io.ClassPathResource;
 import org.nd4j.linalg.util.HashUtil;
 
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.Assert.*;
@@ -59,7 +54,7 @@ public class TensorFlowImportTest {
 
         assertNotNull(graph);
 
-        assertEquals(2, graph.getVariableMap().size());
+        assertEquals(2, graph.variableMap().size());
         assertEquals(2, graph.getGraph().getInputs().size());
         assertEquals(1, graph.getGraph().getOpOrder().getActions().size());
 
@@ -71,8 +66,8 @@ public class TensorFlowImportTest {
         assertEquals(Op.Type.TRANSFORM, state.getOpType());
         assertEquals(0, state.getOpNum());
 
-        SDVariable var0 = graph.getVariableMap().get("zeros");
-        SDVariable var1 = graph.getVariableMap().get("ones");
+        SDVariable var0 = graph.variableMap().get("zeros");
+        SDVariable var1 = graph.variableMap().get("ones");
 
         assertNotNull(var0);
         assertNotNull(var1);
@@ -110,16 +105,12 @@ public class TensorFlowImportTest {
         val p0 = Nd4j.create(10, 10).assign(2.0);
         val p1 = Nd4j.create(10, 10).assign(3.0);
 
-
-        graph.getVariableMap().get("Placeholder").setArr(p0);
-        graph.getVariableMap().get("Placeholder_1").setArr(p1);
-
-        graph.getVertexToArray().put("Placeholder", p0);
-        graph.getVertexToArray().put("Placeholder_1", p1);
+        graph.associateArrayWithVariable(p0,graph.variableMap().get("Placeholder"));
+        graph.associateArrayWithVariable(p1, graph.variableMap().get("Placeholder_1"));
 
 
-//        graph.var("Placeholder", p0);
-//        graph.var("Placeholder_1", p1);
+        graph.var("Placeholder", p0);
+        graph.var("Placeholder_1", p1);
 
         val res = graph.execAndEndResult();
 
@@ -309,6 +300,42 @@ public class TensorFlowImportTest {
             dos.write(array, offset, array.length - offset);
         }
         */
+    }
+
+    @Test
+    public void testIntermediateStridedSlice1() throws Exception {
+        Nd4j.create(1);
+        val tg = TensorFlowImport.importIntermediate(new ClassPathResource("tf_graphs/tensor_slice.pb.txt").getFile());
+
+        assertNotNull(tg);
+
+        val constIn = tg.getVariableSpace().getVariable("StridedSlice/input");
+        assertNotNull(constIn);
+
+        assertEquals(139.5, constIn.getArray().sumNumber().doubleValue(), 1e-5);
+
+
+        // now converting to FlatBuffer
+        val fb = tg.asFlatBuffers();
+        assertNotNull(fb);
+/*
+        val offset = fb.position();
+
+        log.info("Length: {}; Offset: {};", fb.capacity(), offset);
+        val array = fb.array();
+
+        try (val fos = new FileOutputStream("../../../libnd4j/tests_cpu/resources/tensor_slice.fb"); val dos = new DataOutputStream(fos)) {
+            dos.write(array, offset, array.length - offset);
+        }
+        */
+    }
+
+    @Test
+    public void testIntermediateTensorArrayLoop1() throws Exception {
+        Nd4j.create(1);
+        val tg = TensorFlowImport.importIntermediate(new ClassPathResource("tf_graphs/tensor_array_loop.pb.txt").getFile());
+
+        assertNotNull(tg);
     }
 
     @Test

@@ -7,10 +7,11 @@ import org.nd4j.autodiff.functions.DifferentialFunction;
 import org.nd4j.autodiff.opstate.NDArrayVertex;
 import org.nd4j.autodiff.opstate.OpState;
 import org.nd4j.autodiff.samediff.SameDiff;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
+import org.nd4j.autodiff.samediff.SDVariable;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.CustomOp;
 import org.nd4j.linalg.api.ops.Op;
+import org.nd4j.weightinit.impl.ZeroInitScheme;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -65,22 +66,21 @@ public class While extends DifferentialFunction implements CustomOp {
                  SameDiff.SameDiffConditional predicate,
                  SameDiff.SameDiffFunctionDefinition condition,
                  SameDiff.SameDiffFunctionDefinition trueBody) {
-
         this.sameDiff = parent;
         this.inputVars = inputVars;
         this.predicate = predicate;
         this.trueBody = trueBody;
         this.blockName = blockName;
-        this.dummyResult =  SDVariable.builder()
-                .varName("dummyresult-" + UUID.randomUUID().toString()).sameDiff(parent).shape(new int[]{1,1}).build();
-        this.vertexId = new int[] {parent.graph().nextVertexId()};
-        NDArrayVertex dummyVertex = new NDArrayVertex(parent,this.vertexId[0],0,dummyResult);
-        parent.graph().addVertex(dummyVertex);
-        this.vertex = dummyVertex;
+        int[] vertexId = {parent.graph().nextVertexId()};
+
+        this.dummyResult =  parent.var("dummyresult-" + UUID.randomUUID().toString(),new int[]{1,1},new ZeroInitScheme('f'),vertexId);
+        this.vertexId = vertexId;
+        parent.putFunction(vertexId,this);
         int[] inputEdges = new int[inputVars.length];
         String[] opEdgeIds = new String[inputVars.length];
         for(int i = 0; i < inputVars.length; i++) {
             inputVars[i] = parent.var(inputVars[i]);
+            inputEdges[i] = inputVars[i].getVertexId()[0];
         }
 
 
@@ -105,16 +105,14 @@ public class While extends DifferentialFunction implements CustomOp {
         //running define function will setup a proper same diff instance
         parent.defineFunction(trueBodyName,trueBody,inputVars);
         parent.defineFunction(blockName,condition,inputVars);
-        parent.getSameDiffFunctionInstances().put("predicate-eval-body",sameDiff);
+        parent.putSubFunction("predicate-eval-body",sameDiff);
         //get a reference to the actual loop body
         this.loopBodyExecution = parent.getFunction(trueBodyName);
 
         OpState opState = OpState.builder()
                 .opName(opName())
                 .opType(Op.Type.LOOP)
-                .differentialFunction(this)
                 .inPlace(false)
-                .results(new SDVariable[]{dummyResult})
                 .id(UUID.randomUUID().toString())
                 .vertexIds(opEdgeIds)
                 .build();
@@ -124,14 +122,16 @@ public class While extends DifferentialFunction implements CustomOp {
     }
 
 
+    /**
+     * Increments the loop counter.
+     * This should be called when the loop
+     * actually executes.
+     */
     public void incrementLoopCounter() {
         numLooped++;
     }
 
-    @Override
-    public NDArrayVertex getVertex() {
-        return vertex;
-    }
+
 
     @Override
     public int[] getResultShape() {

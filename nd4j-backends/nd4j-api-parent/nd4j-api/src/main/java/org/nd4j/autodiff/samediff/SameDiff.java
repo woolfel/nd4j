@@ -4,17 +4,12 @@ import com.google.common.base.Preconditions;
 import com.rits.cloning.Cloner;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-
-import org.nd4j.linalg.api.ops.impl.controlflow.If;
-import org.nd4j.linalg.api.ops.impl.controlflow.While;
-import org.nd4j.linalg.api.ops.impl.transforms.Constant;
 import org.nd4j.autodiff.functions.DifferentialFunction;
 import org.nd4j.autodiff.functions.DifferentialFunctionFactory;
 import org.nd4j.autodiff.graph.api.Edge;
 import org.nd4j.autodiff.opstate.*;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
 import org.nd4j.linalg.api.buffer.util.DataTypeUtil;
 import org.nd4j.linalg.api.memory.MemoryWorkspace;
 import org.nd4j.linalg.api.memory.conf.WorkspaceConfiguration;
@@ -22,10 +17,13 @@ import org.nd4j.linalg.api.memory.enums.AllocationPolicy;
 import org.nd4j.linalg.api.memory.enums.LearningPolicy;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.*;
+import org.nd4j.linalg.api.ops.impl.controlflow.If;
+import org.nd4j.linalg.api.ops.impl.controlflow.While;
 import org.nd4j.linalg.api.ops.impl.layers.convolution.Conv2D;
 import org.nd4j.linalg.api.ops.impl.layers.convolution.Conv3D;
 import org.nd4j.linalg.api.ops.impl.layers.convolution.config.Conv2DConfig;
 import org.nd4j.linalg.api.ops.impl.layers.convolution.config.Conv3DConfig;
+import org.nd4j.linalg.api.ops.impl.transforms.Constant;
 import org.nd4j.linalg.api.ops.impl.transforms.gradient.GradientBackwardsMarker;
 import org.nd4j.linalg.api.shape.Shape;
 import org.nd4j.linalg.collection.IntArrayKeyMap;
@@ -33,6 +31,8 @@ import org.nd4j.linalg.exception.ND4JIllegalStateException;
 import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.primitives.Pair;
 import org.nd4j.linalg.util.ArrayUtil;
+import org.nd4j.weightinit.WeightInitScheme;
+import org.nd4j.weightinit.impl.ConstantInitScheme;
 import org.nd4j.weightinit.impl.NDArraySupplierInitScheme;
 import org.nd4j.weightinit.impl.ZeroInitScheme;
 
@@ -57,7 +57,6 @@ import java.util.*;
  *
  */
 @AllArgsConstructor
-@Data
 @Builder
 @Slf4j
 public class SameDiff {
@@ -65,7 +64,10 @@ public class SameDiff {
     private DifferentialFunctionFactory functionFactory;
     private Map<String,SDVariable> variableMap;
     private Map<int[],SDVariable> vertexIdToVariable;
-    private Map<String,INDArray> vertexToArray;
+    //gradient information
+    private Map<int[],SDVariable> gradients;
+    private Map<int[],SDVariable> forwardVarForGrad;
+    private Map<int[],INDArray> vertexIdToArr;
     private IdentityHashMap<INDArray,SDVariable> reverseArrayLookup;
     private MemoryWorkspace workspace;
     private Map<String,SameDiffFunctionDefinition> sameDiffFunctionDefinitionMap;
@@ -76,6 +78,7 @@ public class SameDiff {
 
 
     //debug mode variables
+    @Getter
     private boolean debugMode;
     private Map<int[],Op> opsForResult;
     private Map<OpExecAction,ForwardBackwardState> forwardBackwardStates;
@@ -132,8 +135,6 @@ public class SameDiff {
         for(int i = 0; i < graph().numVertices(); i++) {
             int nextVertexId = sameDiff.graph.nextVertexId();
             SDVariable clone = cloner.deepClone(graph.getVertex(i + 1).getValue());
-            if(clone.getOpState() != null && clone.getOpState().getDifferentialFunction() != null)
-                clone.getOpState().getDifferentialFunction().setSameDiff(sameDiff);
             NDArrayVertex info = new NDArrayVertex(
                     sameDiff,
                     nextVertexId,
@@ -141,72 +142,32 @@ public class SameDiff {
                     clone);
             thisVertexIdToNew.put(graph.getVertex(i + 1).vertexID(),nextVertexId);
             sameDiff.graph().addVertex(info);
+
+        }
+
+        for(List<Edge<OpState>> edgeList : graph().getEdges().values()) {
+            for(Edge<OpState> edge : edgeList) {
+                OpStateEdge newEdge = new OpStateEdge(
+                        new int[]{thisVertexIdToNew.get(edge.getFrom()[0])},
+                        new int[]{thisVertexIdToNew.get(edge.getTo()[0])},
+                        cloner.deepCloneDontCloneInstances(edge.getValue()),true);
+                newEdge.getValue().setVertexIds(sameDiff.generateVertexIds(newEdge.getFrom()[0],newEdge.getTo()[0]));
+
+                sameDiff.graph().addEdge(newEdge);
+            }
         }
 
 
+        for(List<Edge<OpState>> edgeList : graph().getIncomingEdges().values()) {
+            for(Edge<OpState> edge : edgeList) {
+                OpStateEdge newEdge = new OpStateEdge(
+                        new int[]{thisVertexIdToNew.get(edge.getFrom()[0])},
+                        new int[]{thisVertexIdToNew.get(edge.getTo()[0])},
+                        cloner.deepCloneDontCloneInstances(edge.getValue()),true);
+                newEdge.getValue().setVertexIds(sameDiff.generateVertexIds(newEdge.getFrom()[0],newEdge.getTo()[0]));
+                sameDiff.graph().addEdge(newEdge);
 
-        for(int i = 0; i < graph().numVertices(); i++) {
-            /**
-             * In this loop also remap the
-             * same diff variables
-             * with setupFunction,
-             */
-            List<Edge<OpState>> edgesForVertex = graph.getEdges().get(new int[]{i + 1});
-            List<Edge<OpState>> incomingEdgesForVertex = graph.getIncomingEdges()
-                    .get(new int[]{i + 1});
-            //map to new vertex
-            int newVertexMap = thisVertexIdToNew.get(i + 1);
-            if(edgesForVertex != null) {
-                List<Edge<OpState>> edgesForNewVertex = new ArrayList<>();
-                sameDiff.graph().getEdges().put(new int[]{newVertexMap}, edgesForNewVertex);
-                for (Edge<OpState> edge : edgesForVertex) {
-                    Preconditions.checkState(thisVertexIdToNew.containsKey(edge.getFrom()[0]),"Edge missing from vertex id for copy " + edge.getFrom()[0]);
-                    Preconditions.checkState(thisVertexIdToNew.containsKey(edge.getTo()[0]),"Edge missing to vertex id for copy " + edge.getTo()[0]);
-
-                    OpStateEdge newEdge = new OpStateEdge(
-                            new int[]{thisVertexIdToNew.get(edge.getFrom()[0])},
-                            new int[]{thisVertexIdToNew.get(edge.getTo()[0])},
-                            cloner.deepClone(edge.getValue()), true);
-                    newEdge.getValue().setVertexIds(sameDiff.generateVertexIds(newEdge.getFrom()[0],newEdge.getTo()[0]));
-                    edgesForNewVertex.add(newEdge);
-
-                }
             }
-
-            if(incomingEdgesForVertex != null) {
-                List<Edge<OpState>> newIncomingEdges = new ArrayList<>();
-                sameDiff.graph().getIncomingEdges().put(new int[]{newVertexMap},newIncomingEdges);
-                for(Edge<OpState> edge : incomingEdgesForVertex) {
-                    OpStateEdge newEdge = new OpStateEdge(
-                            new int[]{thisVertexIdToNew.get(edge.getFrom()[0])},
-                            new int[]{thisVertexIdToNew.get(edge.getTo()[0])},
-                            cloner.deepCloneDontCloneInstances(edge.getValue()),true);
-                    newEdge.getValue().setVertexIds(sameDiff.generateVertexIds(newEdge.getFrom()[0],newEdge.getTo()[0]));
-
-                    newIncomingEdges.add(newEdge);
-
-                    if(newEdge.getValue().getDifferentialFunction() != null) {
-                        ensureSameDiffInstance(sameDiff,newEdge.getValue().getDifferentialFunction());
-                        newEdge.getValue().setDifferentialFunction(sameDiff.setupFunction(newEdge.getValue().getDifferentialFunction()));
-                        newEdge.getValue().getDifferentialFunction().setVertexId(edge.getValue().getDifferentialFunction().resultVertexId());
-                    }
-                }
-            }
-
-
-
-            if(functionInstances.containsKey(new int[]{i + 1})) {
-                DifferentialFunction function = functionInstances.get(new int[]{i + 1});
-                if(function instanceof SDVariable)
-                    continue;
-                DifferentialFunction clone = sameDiff.setupFunction(cloner.deepClone(function));
-                clone.setVertexId(new int[]{newVertexMap});
-                sameDiff.functionInstances.put(new int[]{newVertexMap},clone);
-                ensureSameDiffInstance(sameDiff,clone);
-            }
-
-
-
         }
 
 
@@ -217,66 +178,160 @@ public class SameDiff {
         for(SDVariable variable : variables) {
             SDVariable deepClone = cloner.deepCloneDontCloneInstances(
                     variable,
-                    variable.getDifferentialFunction(),
-                    variable.getVertex(),
                     variable.getArr(),
                     variable.getSameDiff(),
                     variable.getShape());
             Preconditions.checkState(thisVertexIdToNew.containsKey(variable.getVertexId()[0]),variable.getVertexId()[0] + " not found in mapped vertices!");
             int newVertexMap = thisVertexIdToNew.get(variable.getVertexId()[0]);
 
-            //change the vertex id to the new value
-            //for the graph transition
-            if(variable.getDifferentialFunction() != null) {
-                DifferentialFunction val = sameDiff.functionInstances.get(new int[]{newVertexMap});
-                deepClone.setDifferentialFunction(val);
-
-            }
-
-
-            if(variable.getVertex() != null)
-                deepClone.setVertex((NDArrayVertex) sameDiff.graph().getVertex(newVertexMap));
 
             deepClone.setVertexId(new int[]{newVertexMap});
             deepClone.setSameDiff(sameDiff);
             sameDiff.addVariable(deepClone);
 
+            if(variable.getArr() != null) {
+                sameDiff.associateArrayWithVariable(variable.getArr(),deepClone);
+            }
+
+
+        }
+
+
+        for(DifferentialFunction function : functionInstances.values())  {
+            int[] newVertexId = {thisVertexIdToNew.get(function.getVertexId()[0])};
+            DifferentialFunction clone = cloner.deepCloneDontCloneInstances(
+                    function,
+                    function.getSameDiff(),
+                    function.getVertexId());
+            clone.setSameDiff(sameDiff);
+            clone.setVertexId(newVertexId);
+            sameDiff.putFunction(newVertexId,clone);
+            for(DifferentialFunction clonedArgs : clone.args()) {
+                clonedArgs.setSameDiff(sameDiff);
+            }
 
 
         }
 
         sameDiff.reverseArrayLookup.putAll(reverseArrayLookup);
-        sameDiff.vertexToArray.putAll(vertexToArray);
         return sameDiff.variables().get(sameDiff.variables().size() - 1);
 
     }
 
 
     /**
-     * Get the variable for the given vertex id
+     * Get the variable for the given vertex id.
+     * WARNING: This function also has side effects.
+     * {@link SDVariable} instances will be created
+     * if a valid {@link DifferentialFunction} is present.
+     * Otherwise an {@link ND4JIllegalStateException} is thrown
+     * for no vertex id.
      * @param vertexId the vertex id (usually a 1 length array but can be multiple)
      * @return the variable for this vertex
      */
     public SDVariable getVariableForVertexId(int[] vertexId) {
         if(!vertexIdToVariable.containsKey(vertexId)) {
-            throw new IllegalArgumentException("No vertex id of " + Arrays.toString(vertexId) + " found!");
+            if(functionInstances.containsKey(vertexId)) {
+                DifferentialFunction func = getFunctionForVertexId(vertexId);
+                if(func == null)
+                    throw new IllegalArgumentException("No vertex id of " + Arrays.toString(vertexId) + " function or variable found!");
+                SDVariable newVar = var(generateVariableName(func.opName(),false,func.args()),func.getShape(),func.depth() + 1);
+                Preconditions.checkState(newVar.getSameDiff() == this,"Same diff instance for variable must be the same!");
+                vertexIdToVariable.put(vertexId,newVar);
+                addVariable(newVar);
+            }
+            else
+                throw new IllegalArgumentException("No vertex id of " + Arrays.toString(vertexId) + " found!");
         }
 
         return vertexIdToVariable.get(vertexId);
     }
 
+
     /**
-     * Return the array information
-     * for the given array
-     * (note that array references
-     * are used rather than a clone, so dup() ed arrays
-     * will not work here)
-     * @param arr the array reference to get the information for
-     * @return the {@link SDVariable}
-     * for the given array reference
+     * Update the ndarray for the given vertex id.
+     * @throws {@link ND4JIllegalStateException} when the array does not exist.
+     * @param vertexId
+     * @param arr
      */
-    public SDVariable getInfoFor(INDArray arr) {
-        return reverseArrayLookup.get(arr);
+    public void updateArrayForVertexId(int[] vertexId,INDArray arr) {
+        if(vertexIdToArr.containsKey(vertexId)) {
+            throw new ND4JIllegalStateException("Array for " + Arrays.toString(vertexId) + " does not exist. Please use putArrayForVertexId instead.");
+        }
+        vertexIdToArr.put(vertexId,arr);
+    }
+
+    /**
+     * Adds an ndarray for a given vertex id.
+     * Use {@link #updateArrayForVertexId(int[], INDArray)}
+     * if the array already exists.
+     *
+     * @param vertexId the vertex id to add
+     * @param arr the array to add
+     *
+     * @throws {@link ND4JIllegalStateException} when the array already exists.
+     */
+    public void putArrayForVertexId(int[] vertexId,INDArray arr) {
+        if(vertexIdToArr.containsKey(vertexId)) {
+            throw new ND4JIllegalStateException("Array for " + Arrays.toString(vertexId) + " already exists!");
+        }
+        vertexIdToArr.put(vertexId,arr);
+    }
+
+
+    /**
+     * Returns true if the given vertex id
+     * and {@link INDArray} already exist.
+     * @param vertexId the vertex id
+     * @return true if the ndarray and vertex id already exist
+     */
+    public boolean arrayAlreadyExistsForVertexId(int...vertexId) {
+        return vertexIdToArr.containsKey(vertexId);
+    }
+
+    /**
+     * Get an {@link INDArray}
+     * for a given vertex id
+     * @param vertexId
+     * @return
+     */
+    public INDArray getArrForVertexId(int...vertexId) {
+        return vertexIdToArr.get(vertexId);
+    }
+
+    /**
+     * Associate the array with the given variable.
+     * @param arr the array to get the variable for
+     * @param variable the variable to associate
+     */
+    public void associateArrayWithVariable(INDArray arr, SDVariable variable) {
+        reverseArrayLookup.put(arr,variable);
+        vertexIdToArr.put(variable.getVertexId(),arr);
+    }
+
+
+    /**
+     * Associate a {@link SameDiff}
+     * namespace as a sub function.
+     * @param name the name of the function
+     * @param nameSpace the namespace
+     */
+    public void putSubFunction(String name,SameDiff nameSpace) {
+        if(sameDiffFunctionInstances.containsKey(name) && sameDiffFunctionInstances.get(name) != nameSpace) {
+            throw new ND4JIllegalStateException("Unable to replace samediff namespace. Please choose another name");
+        }
+
+
+        sameDiffFunctionInstances.put(name,nameSpace);
+    }
+
+
+    /**
+     * Return the internal variable map
+     * @return
+     */
+    public Map<String,SDVariable> variableMap() {
+        return variableMap;
     }
 
 
@@ -348,7 +403,18 @@ public class SameDiff {
     }
 
 
-
+    /**
+     * Get an {@link SDVariable}
+     * for an array reference.
+     * Internally samediff associates array references
+     * with variables. This will typically be a shortcut
+     * for the array associated with {@link SDVariable#getArr()}
+     * @param arr the array reference
+     * @return the variable if one exists
+     */
+    public SDVariable getVariableForArray(INDArray arr) {
+        return reverseArrayLookup.get(arr);
+    }
 
 
     /**
@@ -384,14 +450,16 @@ public class SameDiff {
         graph.setSameDiff(this);
         functionFactory = new DifferentialFunctionFactory(this);
         variableMap = new HashMap<>();
-        vertexToArray = new HashMap<>();
         sameDiffFunctionDefinitionMap = new HashMap<>();
         sameDiffFunctionInstances = new HashMap<>();
         functionInstances = new IntArrayKeyMap<>();
         vertexIdToVariable = new IntArrayKeyMap<>();
+        gradients = new IntArrayKeyMap<>();
+        forwardVarForGrad = new IntArrayKeyMap<>();
         forwardBackwardStates = new HashMap<>();
         opsForResult = new IntArrayKeyMap<>();
         reverseArrayLookup = new IdentityHashMap<>();
+        vertexIdToArr = new IntArrayKeyMap<>();
     }
 
 
@@ -414,7 +482,12 @@ public class SameDiff {
     public <X extends DifferentialFunction> X setupFunction(X  function) {
         Preconditions.checkNotNull(function,"Passed in function must not be null!");
         int[] idx = function.getVertexId();
-
+        if(function instanceof SDVariable) {
+            if(function.getSameDiff() != this) {
+                function.setSameDiff(this);
+            }
+            return function;
+        }
         DifferentialFunction get = null;
 
         if(idx != null && functionInstances.containsKey(idx)) {
@@ -422,54 +495,19 @@ public class SameDiff {
             //note that we check if the graph is frozen
             //if the graph is frozen this reference is disposable
             if(!graph().isFrozen() && !function.equals(get)) {
+
                 throw new IllegalStateException("Attempted to override Differential Function instance with idx " + idx + " with instance " + function);
             }
         }
         else if(idx != null) {
             get = function;
-            functionInstances.put(idx,function);
+            if(!(get instanceof SDVariable) && !(function instanceof GradientBackwardsMarker))
+                functionInstances.put(idx,function);
         }
         else {
             get = function;
         }
 
-        if(idx == null || get.getSameDiff() != this || get.getVertex() == null) {
-            /**
-             * Note that we generate a new id
-             * if the intended samediff instance
-             * isn't "this" samediff.
-             *
-             * Otherwise, we assume that the intended index
-             * is already being set.
-             *
-             * The reason for this is to allow for people to
-             * set the id externally.
-             *
-             * We also check if the id is zero (unset, an id can never be < 1)
-             */
-            NDArrayVertex ndArrayVertex = new NDArrayVertex(this,get.getSameDiff() != this || idx == null || idx[0] == 0 ? graph().nextVertexId() : idx[0],0,get.getResult());
-            graph().addVertex(ndArrayVertex);
-            get.setVertex(ndArrayVertex);
-            get.setSameDiff(this);
-            get.setVertexId(new int[]{ndArrayVertex.vertexID()});
-        }
-
-        if(!graph().getVertices().containsKey(get.getVertex().vertexID())) {
-            graph().addVertex(get.getVertex());
-        }
-
-        if(get instanceof SDVariable) {
-            SDVariable sdVariable  = (SDVariable) get;
-            if(!variableMap.containsKey(sdVariable.getVarName()))
-                variableMap.put(sdVariable.getVarName(),sdVariable);
-            if(!vertexIdToVariable.containsKey(sdVariable.resultVertexId()))
-                vertexIdToVariable.put(sdVariable.getOutputVertexIds(),sdVariable);
-
-            if( sdVariable.getArr() != null) {
-                reverseArrayLookup.put(sdVariable.getArr(),sdVariable);
-            }
-
-        }
 
 
         return (X) get;
@@ -538,9 +576,8 @@ public class SameDiff {
     public static SameDiff create(SameDiff originalSameDiff, SDGraph graph) {
         SDGraph clone = new SDGraph(graph);
         SameDiff ret = SameDiff.builder()
-                .variableMap(originalSameDiff.getVariableMap())
-                .sameDiffFunctionInstances(originalSameDiff.getSameDiffFunctionInstances())
-                .vertexToArray(originalSameDiff.getVertexToArray())
+                .variableMap(originalSameDiff.variableMap)
+                .sameDiffFunctionInstances(originalSameDiff.sameDiffFunctionInstances)
                 .graph(clone)
                 .build();
         //ensuring proper sameDiff reference
@@ -548,7 +585,7 @@ public class SameDiff {
         DifferentialFunctionFactory differentialFunctionFactory =
                 new
                         DifferentialFunctionFactory(ret);
-        ret.setFunctionFactory(differentialFunctionFactory);
+        ret.functionFactory = differentialFunctionFactory;
         return ret;
     }
 
@@ -561,8 +598,6 @@ public class SameDiff {
 
         if (graph != null ? !graph.equals(sameDiff.graph) : sameDiff.graph != null) return false;
         if (variableMap != null ? !variableMap.equals(sameDiff.variableMap) : sameDiff.variableMap != null)
-            return false;
-        if (vertexToArray != null ? !vertexToArray.equals(sameDiff.vertexToArray) : sameDiff.vertexToArray != null)
             return false;
         if (sameDiffFunctionDefinitionMap != null ? !sameDiffFunctionDefinitionMap.equals(sameDiff.sameDiffFunctionDefinitionMap) : sameDiff.sameDiffFunctionDefinitionMap != null)
             return false;
@@ -625,95 +660,6 @@ public class SameDiff {
 
 
 
-    /**
-     * Allocate ndarrays in to memory,
-     * linking the {@link SDVariable}
-     * {@link INDArray}
-     * provided with {@link SDVariable#getArr()}
-     * as needed.
-     */
-    public void allocate() {
-        if(workspace != null) {
-            workspace.close();
-        }
-        else {
-            initWorkspace();
-        }
-
-
-        for (Integer i : graph().getVertices().keySet()) {
-            SDVariable info = graph.getVariableForVertex(i);
-            allocateArrayFor(info);
-        }
-
-    }
-
-
-    /**
-     * Allocate an individual {@link INDArray}
-     * for a given {@link SDVariable}
-     * @param sdVariable the variable to allocate
-     *                   memory for
-     */
-    public void allocateArrayFor(SDVariable sdVariable) {
-        if(workspace != null) {
-            workspace.close();
-        }
-        else {
-            initWorkspace();
-        }
-
-        SDVariable info = sdVariable;
-        DifferentialFunction func = functionInstances.get(info.getVertexId());
-
-        if(!variableMap.containsKey(info.getVarName())) {
-            SDVariable.SDVariableBuilder variableBuilder = SDVariable.builder()
-                    .sameDiff(this)
-                    .varName(info.getVarName());
-            //associate the proper differential function with the given
-            //variable
-            if(func != null)
-                variableBuilder.differentialFunction(func);
-
-            if(func != null)
-                variableBuilder.shape(info.getShape());
-
-            variableBuilder.vertexId(info.getVertexId());
-
-            SDVariable variable = variableBuilder.build();
-            variableMap.put(info.getVarName(),variable);
-        }
-
-        /**
-         * Problem:
-         * Vertexes are not a unique identifier of an actual array.
-         * Duplicate vertices are put in to place
-         * to avoid cycles by may point at the same array.
-         * NDArrayInformation should somehow be unique
-         * and point to an actual array.
-         */
-        if(!vertexToArray.containsKey(info.getVarName()) || vertexToArray.get(info.getVarName()) == null) {
-            //initialize value if it's actually a scalar constant (zero or 1 typically...)
-            if(info.getScalarValue() != null && ArrayUtil.prod(info.getShape()) == 1) {
-                INDArray arr = Nd4j.valueArrayOf(info.getShape(),
-                        info.getScalarValue().doubleValue());
-                vertexToArray.put(info.getVarName(),arr);
-                reverseArrayLookup.put(arr,info);
-                info.setArr(arr);
-            }
-            else {
-                INDArray newAlloc = info.getWeightInitScheme().create(info.getShape(),Nd4j.zeros(info.getShape(),info.getWeightInitScheme().order()));
-                vertexToArray.put(info.getVarName(),newAlloc);
-                reverseArrayLookup.put(newAlloc,info);
-                info.setArr(newAlloc);
-
-            }
-
-        }
-
-
-    }
-
 
     private void initWorkspace() {
         workspace = Nd4j.getWorkspaceManager().createNewWorkspace(
@@ -736,15 +682,86 @@ public class SameDiff {
         return new ArrayList<>(variableMap.values());
     }
 
+    /**
+     * Variable initialization
+     * with 1.0
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @return the created variable
+     */
+    public SDVariable one(String name, int[] shape) {
+        return var(name,shape,1.0);
+
+    }
+
 
     /**
-     *
-     *
-     * @param name
-     * @param shape
-     * @return
+     * Variable initialization
+     * with 0.0
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @return the created variable
      */
-    public SDVariable var(String name, int[] shape,int depth) {
+    public SDVariable zero(String name, int[] shape) {
+        return var(name,shape,0.0);
+
+    }
+
+
+
+    /**
+     * Variable initialization
+     * with a  constant
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @param constant the value to be initialized with
+     * @return the created variable
+     */
+    public SDVariable var(String name, int[] shape,double constant) {
+        return var(name,shape,new ConstantInitScheme('f',constant),0);
+
+    }
+
+
+    /**
+     * Variable initialization
+     * with a specified {@link WeightInitScheme}
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @param weightInitScheme the weight init scheme
+     * @return the created variable
+     */
+    public SDVariable var(String name, int[] shape, WeightInitScheme weightInitScheme) {
+        return var(name,shape,weightInitScheme,0);
+
+    }
+
+
+    /**
+     * Variable initialization
+     * with a specified {@link WeightInitScheme}
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @param weightInitScheme the weight init scheme
+     * @param vertexId  the vertex id to use for the variable
+     * @return the created variable
+     */
+    public SDVariable var(String name, int[] shape, WeightInitScheme weightInitScheme,int[] vertexId) {
+        return var(name,shape,weightInitScheme,vertexId,0);
+    }
+
+
+    /**
+     * Variable initialization
+     * with a specified {@link WeightInitScheme}
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @param weightInitScheme the weight init scheme
+     * @param vertexId  the vertex id to use for the variable
+     * @param depth the depth in the graph (default 0)
+     * @return the created variable
+     */
+    public SDVariable var(String name, int[] shape, WeightInitScheme weightInitScheme,int[] vertexId,int depth) {
         if(variableMap.containsKey(name) && variableMap.get(name).getArr() != null)
             return variableMap.get(name);
 
@@ -756,20 +773,51 @@ public class SameDiff {
             initWorkspace();
 
 
-        int[] vertexId = {graph.nextVertexId()};
         SDVariable ret = SDVariable.builder()
                 .sameDiff(this)
                 .vertexId(vertexId)
-                .shape(shape).weightInitScheme(new ZeroInitScheme('f'))
+                .shape(shape).weightInitScheme(weightInitScheme)
                 .varName(name)
                 .build();
 
-        NDArrayVertex ndArrayVertex = new NDArrayVertex(this,vertexId[0], depth,ret);
-        graph.addVertex(ndArrayVertex);
+        if(graph().getVertex(vertexId[0]) == null) {
+            NDArrayVertex ndArrayVertex = new NDArrayVertex(this, vertexId[0], depth, ret);
+            graph.addVertex(ndArrayVertex);
+        }
+
         addVariable(ret);
         variableMap.put(name,ret);
         return ret;
 
+    }
+
+
+    /**
+     * Variable initialization
+     * with a specified {@link WeightInitScheme}
+     * , depth, and vertex id of{@link SDGraph#nextVertexId}
+     * @param name the name of the variable
+     * @param shape the shape of the array to be created
+     * @param weightInitScheme the weight init scheme
+     * @param depth the depth in the graph (default 0)
+     * @return the created variable
+     */
+    public SDVariable var(String name, int[] shape, WeightInitScheme weightInitScheme,int depth) {
+        return var(name, shape, weightInitScheme, new int[]{graph.nextVertexId()},depth);
+
+    }
+
+
+
+    /**
+     *
+     *
+     * @param name
+     * @param shape
+     * @return
+     */
+    public SDVariable var(String name, int[] shape,int depth) {
+        return var(name,shape,new ZeroInitScheme('f'),depth);
     }
 
 
@@ -819,12 +867,11 @@ public class SameDiff {
 
         NDArrayVertex ndArrayVertex = new NDArrayVertex(this,graph.nextVertexId(), 0,arr);
         graph.addVertex(ndArrayVertex);
-        SDVariable ret = SDVariable.builder()
+        final SDVariable ret = SDVariable.builder()
                 .sameDiff(this)
                 .vertexId(new int[]{ndArrayVertex.getIdx()})
                 .shape(arr.getShape())
                 .varName(arr.getVarName())
-                .differentialFunction(arr.getDifferentialFunction())
                 .weightInitScheme(new NDArraySupplierInitScheme(new NDArraySupplierInitScheme.NDArraySupplier() {
                     @Override
                     public INDArray getArr() {
@@ -834,7 +881,8 @@ public class SameDiff {
                          * {@link #allocate()}
                          */
                         if(arr.getArr() == null) {
-                            arr.setArr(arr.getWeightInitScheme().create(arr.getShape()));
+                            INDArray retArr =  arr.getWeightInitScheme().create(arr.getShape());
+                            associateArrayWithVariable(retArr,arr);
                         }
                         return arr.getArr();
                     }
@@ -877,7 +925,8 @@ public class SameDiff {
                 .vertexId(new int[]{vertexIdx})
                 .shape(arr.shape())
                 .varName(name)
-                .arr(arr).build();
+                .build();
+        associateArrayWithVariable(arr,ret);
         if(ArrayUtil.prod(arr.shape()) == 1)
             ret.setScalarValue(arr.getDouble(0));
 
@@ -887,7 +936,6 @@ public class SameDiff {
         addVariable(ret);
         //ensure there is a reference to the array in the integer index
         //this is used later for op creation
-        vertexToArray.put(ret.getVarName(), arr);
         reverseArrayLookup.put(arr, ret);
         variableMap.put(name,ret);
         return ret;
@@ -901,9 +949,51 @@ public class SameDiff {
      *
      */
     public SDVariable getVariable(String name) {
-        return getVariableMap().get(name);
+        return variableMap.get(name);
     }
 
+
+    /**
+     * Get the gradient for the given vertex id
+     * @param vertexId the vertex id
+     * @return the gradient for this variable or null
+     */
+    public SDVariable getGradForVertexId(int...vertexId) {
+        return gradients.get(vertexId);
+    }
+
+
+    /**
+     * Assign a vertex id
+     * to a gradient
+     * @param vertexId the vertex id
+     *                 to assign
+     * @param variable the variable
+     */
+    public void setGradientForVertexId(int[] vertexId, SDVariable variable) {
+        gradients.put(vertexId,variable);
+    }
+
+
+    /**
+     * Get the forward variable for gradient
+     * based on the gradient's vertex id
+     * @param vertexId the vertex id
+     * @return the gradient for the variable or null
+     */
+    public SDVariable getForwardVariableForVertexId(int...vertexId) {
+        return forwardVarForGrad.get(vertexId);
+    }
+
+
+    /**
+     *
+     * @param vertexId
+     * @param forwardVariable
+     */
+    public void setForwardVariableForVertexId(int[] vertexId,SDVariable forwardVariable) {
+        forwardVarForGrad.put(vertexId,forwardVariable);
+    }
 
     /**
      * Gradient with respect
@@ -919,7 +1009,9 @@ public class SameDiff {
             throw new IllegalStateException("Unable to obtain gradient. Please run execBackwards() first.");
         }
 
-        return getFunction("grad").getVariable(varName).gradient();
+        SameDiff grad = getFunction("grad");
+        SDVariable var = grad.getVariable(varName);
+        return getFunction("grad").getGradForVertexId(var.getVertexId());
     }
 
 
@@ -935,14 +1027,8 @@ public class SameDiff {
                 .sameDiff(this)
                 .conv2DConfig(conv2DConfig)
                 .build();
-
-
-        SDVariable ret = SDVariable.builder()
-                .differentialFunction(conv2D)
-                .sameDiff(this)
-                .varName(conv2D.opName() + "(" + createName(inputs) + ")")
-                .build();
-        return ret;
+        updateVariableName(conv2D.getVertexId(),generateVariableName(conv2D.opName(),false,inputs));
+        return getVariableForVertexId(conv2D.getVertexId());
     }
 
 
@@ -958,13 +1044,8 @@ public class SameDiff {
                 .conv3DConfig(conv3DConfig)
                 .sameDiff(this)
                 .build();
-
-        SDVariable ret = SDVariable.builder()
-                .differentialFunction(conv3D)
-                .sameDiff(this)
-                .varName(conv3D.opName() + "(" + createName(inputs) + ")")
-                .build();
-        return ret;
+        updateVariableName(conv3D.getVertexId(),generateVariableName(conv3D.opName(),false,inputs));
+        return getVariableForVertexId(conv3D.getVertexId());
     }
 
 
@@ -997,18 +1078,6 @@ public class SameDiff {
      */
     public SDVariable scalar(String name, double value) {
         return var(name,Nd4j.scalar(value));
-    }
-
-
-    /**
-     * Returns the ndarrays
-     * allocated for a given
-     * {@link SDVariable}
-     * @param info the information to get the array for
-     * @return
-     */
-    public INDArray getNDArray(SDVariable  info) {
-        return getVertexToArray().get(info.getVarName());
     }
 
 
@@ -1797,15 +1866,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable gradientBackwardsMarker(String name, SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.gradientBackwardsMarker(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.gradientBackwardsMarker(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -1815,15 +1878,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable neq(String name,SDVariable iX,double iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.neq(getFunctionInput(iX),iy))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.neq(getFunctionInput(iX),iy);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -1832,15 +1889,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable eq(String name,SDVariable iX,double iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.eq(getFunctionInput(iX),iy))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.eq(getFunctionInput(iX),iy);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -1850,15 +1901,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable gte(String name, SDVariable iX,double iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.gte(getFunctionInput(iX),iy))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.gte(getFunctionInput(iX),iy);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -1867,15 +1912,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lte(String name, SDVariable iX,double iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.lte(getFunctionInput(iX),iy))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lte(getFunctionInput(iX),iy);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -1887,15 +1926,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable gt(String name,SDVariable iX,double iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.gt(getFunctionInput(iX),iy))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.gt(getFunctionInput(iX),iy);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -1904,15 +1937,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lt(String name,SDVariable iX,double iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.lt(getFunctionInput(iX),iy))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lt(getFunctionInput(iX),iy);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -1925,15 +1952,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable neq(String name,SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.neq(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.neq(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -1942,15 +1963,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable eq(String name,SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.eq(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.eq(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -1960,15 +1975,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable gte(String name, SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.gte(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.gte(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -1977,15 +1986,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lte(String name, SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.lte(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lte(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -1997,15 +2000,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable gt(String name,SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.gt(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.gt(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2014,15 +2011,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lt(String name,SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.lt(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lt(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2033,15 +2024,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable or(String name,SDVariable iX, SDVariable iy) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.or(getFunctionInput(iX),getFunctionInput(iy)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.or(getFunctionInput(iX),getFunctionInput(iy));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2050,15 +2035,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable neg(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.neg(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.neg(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2068,15 +2047,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable cos(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.cos(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.cos(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2085,15 +2058,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable sin(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.sin(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.sin(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2102,15 +2069,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable tan(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.tan(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.tan(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2119,15 +2080,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable acos(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.acos(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.acos(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2137,15 +2092,9 @@ public class SameDiff {
      */
 
     public SDVariable asin(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.asin(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.asin(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2154,15 +2103,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable atan(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.atan(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.atan(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2171,15 +2114,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable cosh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.cosh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.cosh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2188,15 +2125,10 @@ public class SameDiff {
      * @return
      */
     public SDVariable sinh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.sinh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.sinh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
+
     }
 
     /**
@@ -2205,15 +2137,10 @@ public class SameDiff {
      * @return
      */
     public SDVariable tanh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.tanh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction
+                result = functionFactory.tanh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2222,15 +2149,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable acosh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.acosh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.acosh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2239,15 +2160,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable asinh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.asinh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.asinh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2256,15 +2171,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable atanh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.atanh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.atanh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2273,15 +2182,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable exp(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.exp(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.exp(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2290,15 +2193,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable log(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.log(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.log(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2308,15 +2205,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable pow(String name,SDVariable iX,double value) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.pow(getFunctionInput(iX),value))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.pow(getFunctionInput(iX),value);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2325,15 +2216,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable sqrt(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.sqrt(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.sqrt(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2342,15 +2227,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable square(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.square(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.square(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2359,15 +2238,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable floor(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.floor(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.floor(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2376,15 +2249,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable relu(String name,SDVariable iX,double cutoff) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.relu(getFunctionInput(iX),cutoff))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.relu(getFunctionInput(iX),cutoff);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2393,15 +2260,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable softmax(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.softmax(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.softmax(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2410,15 +2271,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable softmaxDerivative(String name,SDVariable iX,SDVariable wrt) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.softmaxDerivative(getFunctionInput(iX),getFunctionInput(wrt)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.softmaxDerivative(getFunctionInput(iX),getFunctionInput(wrt));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2427,15 +2282,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable hardTanh(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.hardTanh(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.hardTanh(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2444,15 +2293,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable hardTanhDerivative(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.hardTanhDerivative(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.hardTanhDerivative(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2461,15 +2304,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable sigmoid(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .sameDiff(this)
-                .differentialFunction(functionFactory.sigmoid(getFunctionInput(iX)))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.sigmoid(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2480,16 +2317,10 @@ public class SameDiff {
      * @return
      */
     public SDVariable sigmoidDerivative(String name,SDVariable iX,SDVariable wrt) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory
-                        .sigmoidDerivative(getFunctionInput(iX), getFunctionInput(wrt)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory
+                .sigmoidDerivative(getFunctionInput(iX), getFunctionInput(wrt));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2498,16 +2329,10 @@ public class SameDiff {
      * @return
      */
     public SDVariable sign(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory
-                        .sign(getFunctionInput(iX))).differentialFunction(functionFactory
-                        .sign(iX.getDifferentialFunction()))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory
+                .sign(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2516,15 +2341,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable softsign(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.softsign(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.softsign(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2533,14 +2352,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable softsignDerivative(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.softsignDerivative(getFunctionInput(iX)))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.softsignDerivative(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2549,15 +2363,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable softplus(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.softplus(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.softplus(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2566,15 +2374,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable elu(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.elu(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.elu(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2583,15 +2385,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable eluDerivative(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.eluDerivative(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.eluDerivative(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2601,15 +2397,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable leakyRelu(String name,SDVariable iX, double cutoff) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(iX.getShape())
-                .differentialFunction(functionFactory.leakyRelu(getFunctionInput(iX),cutoff))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.leakyRelu(getFunctionInput(iX),cutoff);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2620,17 +2410,11 @@ public class SameDiff {
      * @return
      */
     public SDVariable leakyReluDerivative(String name,SDVariable iX, SDVariable wrt,double cutoff) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.leakyReluDerivative(getFunctionInput(iX),
-                        getFunctionInput(wrt),
-                        cutoff))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.leakyReluDerivative(getFunctionInput(iX),
+                getFunctionInput(wrt),
+                cutoff);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2640,16 +2424,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable mean(String name,SDVariable iX) {
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.mean(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.mean(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2662,20 +2439,12 @@ public class SameDiff {
     public SDVariable standardDeviation(String name,SDVariable iX,
                                         boolean biasCorrected,
                                         int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .sameDiff(this)
-                .differentialFunction(functionFactory.std(
-                        getFunctionInput(iX),
-                        biasCorrected ,
-                        dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.std(
+                getFunctionInput(iX),
+                biasCorrected ,
+                dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2688,19 +2457,11 @@ public class SameDiff {
     public SDVariable variance(String name,SDVariable iX,
                                boolean biasCorrected,
                                int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.variance(getFunctionInput(iX),
-                        biasCorrected ,
-                        dimensions))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.variance(getFunctionInput(iX),
+                biasCorrected ,
+                dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2711,17 +2472,9 @@ public class SameDiff {
      */
     public SDVariable sum(String name,SDVariable iX,
                           int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.sum(getFunctionInput(iX),dimensions))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.sum(getFunctionInput(iX),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2732,17 +2485,9 @@ public class SameDiff {
      */
     public SDVariable prod(String name,SDVariable iX,
                            int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.prod(getFunctionInput(iX),dimensions))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.prod(getFunctionInput(iX),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2753,17 +2498,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable max(String name,SDVariable iX, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.max(getFunctionInput(iX),dimensions))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.max(getFunctionInput(iX),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2775,17 +2512,9 @@ public class SameDiff {
      */
     public SDVariable min(String name,SDVariable iX,
                           int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.min(getFunctionInput(iX),dimensions))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.min(getFunctionInput(iX),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2798,18 +2527,10 @@ public class SameDiff {
     public SDVariable reshape(String name,SDVariable iX,
                               int...shape) {
         shape = Shape.resolveNegativeShapeIfNeccessary(shape,iX.getShape());
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory
-                        .reshape(getFunctionInput(iX),shape))
-                .varName(name)
-                .shape(shape)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory
+                .reshape(getFunctionInput(iX),shape);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2818,15 +2539,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable transpose(String name,SDVariable iX) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.transpose(getFunctionInput(iX)))
-                .varName(name)
-                .sameDiff(this)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.transpose(getFunctionInput(iX));
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2837,15 +2552,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable rollAxis(String name,SDVariable x, int axis) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .sameDiff(this)
-                .differentialFunction(functionFactory.rollAxis(x,axis))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.rollAxis(x,axis);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2855,15 +2564,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable mmul(String name,SDVariable x, SDVariable y) {
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .sameDiff(this)
-                .differentialFunction(functionFactory.mmul(x, y))
-                .varName(name)
-                .build();
-        ret.setShape(Shape.getMatrixMultiplyShape(x.getShape(),y.getShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.mmul(x, y);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2879,17 +2582,9 @@ public class SameDiff {
                                  int[][] dimensions) {
 
         int[] shape = ArrayUtil.getTensorMmulShape(x.getShape(), y.getShape(), dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(functionFactory.tensorMmul(getFunctionInput(x),getFunctionInput(y), dimensions))
-                .varName(name)
-                .sameDiff(this)
-                .shape(shape)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.tensorMmul(getFunctionInput(x),getFunctionInput(y), dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -2905,16 +2600,8 @@ public class SameDiff {
                 getFunctionInput(iX),
                 getFunctionInput(i_y),
                 dimensions);
-
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-        SDVariable ret = SDVariable.builder()
-                .arr(null)
-                .differentialFunction(cosim)
-                .varName(name)
-                .sameDiff(this).shape(arrayReduceShape)
-                .build();
-        addVariable(ret);
-        return ret;
+        updateVariableName(cosim.getVertexId(),name);
+        return getVariableForVertexId(cosim.getVertexId());
     }
 
     /**
@@ -2925,16 +2612,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable euclideanDistance(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.euclideanDistance(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.euclideanDistance(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2945,16 +2625,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable manhattanDistance(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.manhattanDistance(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.manhattanDistance(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2965,16 +2638,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossBinaryXENT(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossBinaryXENT(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossBinaryXENT(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -2985,16 +2651,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossCosineSimilarity(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossCosineSimilarity(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossCosineSimilarity(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3005,16 +2664,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossHinge(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossHinge(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossHinge(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3025,16 +2677,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossKLD(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossKLD(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossKLD(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3045,16 +2690,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossL1(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossL1(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossL1(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3065,16 +2703,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossL2(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossL2(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossL2(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3085,33 +2716,14 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossMAE(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossMAE(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossMAE(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
+
+
     /**
-     public SDVariable lossMAPE(String name,SDVariable iX,SDVariable i_y,int...dimensions) {
-     int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-     SDVariable ret = SDVariable.builder()
-     .arr(null).shape(arrayReduceShape)
-     .differentialFunction(functionFactory.lossMAPE(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-     .varName(name)
-     .build();
-     Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-     addVariable(ret);
-     return ret;
-     }
-
-     /**
      *
      * @param iX
      * @param i_y
@@ -3119,16 +2731,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossMSE(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossMSE(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossMSE(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3139,16 +2744,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossMCXENT(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossMCXENT(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossMCXENT(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3159,16 +2757,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossMSLE(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossMSLE(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossMSLE(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3179,16 +2770,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossNegativeLogLikelihood(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.transpose(getFunctionInput(iX)))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossMSLE(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
     /**
@@ -3199,16 +2783,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossPoisson(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossPoisson(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossPoisson(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -3220,16 +2797,9 @@ public class SameDiff {
      * @return
      */
     public SDVariable lossSquaredHinge(String name,SDVariable iX, SDVariable i_y, int...dimensions) {
-        int[] arrayReduceShape = Shape.getReducedShape(iX.getShape(),dimensions);
-
-        SDVariable ret = SDVariable.builder()
-                .arr(null).shape(arrayReduceShape)
-                .differentialFunction(functionFactory.lossSquaredHinge(getFunctionInput(iX),getFunctionInput(i_y),dimensions))
-                .varName(name)
-                .build();
-        Preconditions.checkState(Arrays.equals(ret.getShape(),ret.getDifferentialFunction().getResultShape()));
-        addVariable(ret);
-        return ret;
+        DifferentialFunction result = functionFactory.lossSquaredHinge(getFunctionInput(iX),getFunctionInput(i_y),dimensions);
+        updateVariableName(result.getVertexId(),name);
+        return getVariableForVertexId(result.getVertexId());
     }
 
 
@@ -3241,6 +2811,7 @@ public class SameDiff {
         if(variableMap == null)
             variableMap = new HashMap<>();
 
+        Preconditions.checkState(variable.getSameDiff() == this,"Samediff instance must be the same.");
 
 
         /**
@@ -3257,11 +2828,9 @@ public class SameDiff {
             throw new IllegalArgumentException("Variable already found with variable name " + variable.getVarName());
         }
 
-        vertexIdToVariable.put(getFunctionInput(variable).resultVertexId(),variable);
+        Preconditions.checkState(variable.getSameDiff() == this,"Same diff instance for variable must be the same!");
+        vertexIdToVariable.put(variable.resultVertexId(),variable);
         variableMap.put(variable.getVarName(),variable);
-        if( variable.getArr() != null) {
-            reverseArrayLookup.put(variable.getArr(),variable);
-        }
 
     }
 
@@ -3334,6 +2903,7 @@ public class SameDiff {
 
 
 
+
     /**
      * Get a function instance
      * given the name
@@ -3346,41 +2916,49 @@ public class SameDiff {
     }
 
 
-    private INDArray getX(OpExecAction opExecAction) {
-        INDArray ret =  vertexToArray.get(opExecAction.getInputs()[0].getVarName());
-        return ret;
-    }
 
-    private INDArray getY(OpExecAction opExecAction) {
-        if(opExecAction.getInputsIds().length > 1) {
-            SDVariable opId = opExecAction.getInputs()[1];
-            INDArray ret = vertexToArray.get(opId.getVarName());
-            return ret;
+    /**
+     * Add a function to this instance for tracking
+     * @param vertexId the vertex id
+     * @param function the function
+     */
+    public void putFunction(int[] vertexId,DifferentialFunction function) {
+        if(function instanceof GradientBackwardsMarker) {
+            return;
         }
-        return null;
+
+
+        if(function instanceof SDVariable) {
+            SDVariable sdVariable = (SDVariable) function;
+            Preconditions.checkState(sdVariable.getSameDiff() == this,"Same diff instance for variable must be the same!");
+            this.vertexIdToVariable.put(vertexId,sdVariable);
+        }
+        else {
+            this.functionInstances.put(vertexId,function);
+        }
     }
 
-    private INDArray getZ(OpExecAction opExecAction) {
-        if(opExecAction.isInPlace())
-            return getX(opExecAction);
-        SDVariable opId = opExecAction.getOutput();
-        INDArray ret =  vertexToArray.get(opId.getVarName());
-        return ret;
+
+
+
+    /**
+     * Get the function for the given vertex id
+     * @param vertexId the vertex id to get the function for
+     * @return the
+     */
+    public DifferentialFunction getFunctionForVertexId(int...vertexId) {
+        return functionInstances.get(vertexId);
     }
 
 
     /**
      *
-     * @param opType
      * @param opExecAction
      * @return
      */
-    public DifferentialFunction createOp(Op.Type opType,
-                                         OpExecAction opExecAction) {
-        DifferentialFunction differentialFunction = opExecAction.getOpState().getDifferentialFunction();
-
+    public DifferentialFunction createOp(OpExecAction opExecAction) {
+        DifferentialFunction differentialFunction = getFunctionForVertexId(opExecAction.getOutputId());
         if(differentialFunction instanceof Op) {
-
             if (differentialFunction instanceof ScalarOp) {
                 ScalarOp scalarOp = (ScalarOp) differentialFunction;
                 scalarOp.setScalar(differentialFunction.getScalarValue());
@@ -3398,7 +2976,7 @@ public class SameDiff {
             return differentialFunction;
         }
 
-
+        Preconditions.checkNotNull(differentialFunction,"Unable to return null function");
 
         return differentialFunction;
     }
@@ -3444,7 +3022,6 @@ public class SameDiff {
          * Exceptions thrown during calculation should happen
          * in the graph very similar to nd4j.
          */
-        allocate();
         if(graph().numVertices() == 0)
             throw new ND4JIllegalStateException("Unable to run exec pipeline. No vertices in graph");
 
@@ -3457,8 +3034,8 @@ public class SameDiff {
     }
 
     private DifferentialFunction getFunctionInput(SDVariable iX) {
-        DifferentialFunction ret =  iX.getDifferentialFunction() != null ?
-                iX.getDifferentialFunction() : iX;
+        DifferentialFunction ret =  getFunctionForVertexId(iX.getVertexId()) != null ?
+                getFunctionForVertexId(iX.getVertexId())  : iX;
         ret = setupFunction(ret);
         Preconditions.checkState(iX.getSameDiff() != null,"Samediff instance must not be null.");
         if(graph().getGraphApply() == null) {
@@ -3493,7 +3070,6 @@ public class SameDiff {
         public SDVariable eval(SameDiff context, SameDiff.SameDiffFunctionDefinition body, SDVariable[] inputVars) {
             context.defineFunction("eval",body,inputVars);
             context.invokeFunctionOn("eval",context);
-            context.allocate();
             OpExecOrder opExecOrder = context.getGraph().getOpOrder();
             int[] finalId = opExecOrder.getActions().get(opExecOrder.getActions().size() - 1).getOutputId();
             return context.getVariableForVertexId(finalId);
@@ -3574,6 +3150,8 @@ public class SameDiff {
     }
 
 
+
+
     /**
      *
      * @param function
@@ -3581,7 +3159,7 @@ public class SameDiff {
     public SameDiff defineFunction(String function,SameDiffFunctionDefinition functionDefinition,SDVariable[] variables) {
         if(!sameDiffFunctionInstances.containsKey(function)) {
             SameDiff sub = SameDiff.create();
-            sub.setWorkspace(workspace);
+            sub.workspace = (workspace);
             //setup subgraph
             //re execute to populate subgraph
             SDVariable[] ret = new SDVariable[variables.length];
@@ -3615,7 +3193,7 @@ public class SameDiff {
                                Map<String,INDArray> inputs) {
         if(!sameDiffFunctionInstances.containsKey(function)) {
             SameDiff sub = SameDiff.create();
-            sub.setWorkspace(workspace);
+            sub.workspace = (workspace);
             //setup subgraph
             //re execute to populate subgraph
             functionDefinition.define(sub,inputs, null);
@@ -3686,56 +3264,40 @@ public class SameDiff {
                     outer.invokeGraphOn(sameDiff);
                     List<OpExecAction> opOrder = sameDiff.graph().getOpOrder(true).getActions();
                     List<OpExecAction> exec = new ArrayList<>();
-                    sameDiff.gradientBackwardsMarker(sameDiff.getVertexIdToVariable().get(opOrder.get(0).getOutputId()));
+                    SDVariable gradientBackwardsMarker = sameDiff.gradientBackwardsMarker(sameDiff.getVariableForVertexId(opOrder.get(0).getOutputId()));
 
                     //start with scalar backprop
-                    DifferentialFunction initialGrad = sameDiff.setupFunction(sameDiff.functionFactory.one(new int[]{1,1}));
-                    DifferentialFunction firstBackward = opOrder.get(0).getOpState().getDifferentialFunction();
-                    firstBackward.setGradient(initialGrad);
-                    SDVariable initialGradVar = SDVariable.builder()
-                            .varName("initialgrad")
-                            .vertexId(initialGrad.resultVertexId())
-                            .sameDiff(sameDiff).arr(Nd4j.scalar(1.0))
-                            .shape(initialGrad.getResultShape())
-                            .differentialFunction(initialGrad)
-                            .build();
-                    sameDiff.addVariable(initialGradVar);
+                    SDVariable initialGrad = sameDiff.one("one-var",new int[]{1,1});
+                    SDVariable firstBackward = sameDiff.getVariableForVertexId(opOrder.get(0).getOutputId());
+                    sameDiff.forwardVarForGrad.put(firstBackward.getVertexId(),initialGrad);
+                    sameDiff.gradients.put(firstBackward.getVertexId(),initialGrad);
+
 
 
                     Set<DifferentialFunction> seen = new HashSet<>();
+
                     for(OpExecAction action : opOrder) {
                         if(action == null || action.getOpState() == null) {
                             log.warn("Action op state is null");
                             continue;
                         }
 
-                        DifferentialFunction currFunction = action.getOpState().getDifferentialFunction();
-                        currFunction.toString();
-                        List<DifferentialFunction> backwardResult = currFunction.diff(Arrays.asList(currFunction.getGradient()));
-
+                        DifferentialFunction currFunction = sameDiff.getFunctionForVertexId(action.getOutputId());
+                        Preconditions.checkState(currFunction.getSameDiff() == sameDiff,"Wrong samediff instance found!");
+                        Preconditions.checkNotNull("Gradient for " + currFunction.opName() + " was null ! " + sameDiff.getVariableForVertexId(currFunction.getVertexId()).getGradient());
+                        SDVariable currVar = sameDiff.getVariableForVertexId(currFunction.getVertexId());
+                        SDVariable inputGrad = currVar.gradient();
+                        Preconditions.checkState(inputGrad.getSameDiff() == sameDiff);
+                        List<DifferentialFunction> backwardResult = currFunction.diff(Arrays.<DifferentialFunction>asList(inputGrad));
                         //clear out all the variables
                         List<SDVariable> functionVars = debugMode ? new ArrayList<SDVariable>(2) : null;
 
                         for(int i = 0; i < backwardResult.size(); i++) {
-                            DifferentialFunction differentialFunction = backwardResult.get(i);
+                            DifferentialFunction differentialFunction = sameDiff.setupFunction(backwardResult.get(i));
                             DifferentialFunction x  = sameDiff.setupFunction(currFunction.args()[i]);
                             if(!seen.contains(x)) {
                                 seen.add(x);
-
-
-                                SDVariable forwardVar = sameDiff.getVertexIdToVariable().get(x.resultVertexId());
-                                SDVariable add = SDVariable.builder()
-                                        .arr(null).differentialFunction(differentialFunction)
-                                        .vertexId(differentialFunction.resultVertexId())
-                                        .shape(differentialFunction.getResultShape())
-                                        .sameDiff(sameDiff)
-                                        .varName(forwardVar.getVarName() + "-grad")
-                                        .build();
-
-                                sameDiff.addVariable(add);
-                                forwardVar.setGradient(add);
-                                add.setForwardVariable(forwardVar);
-
+                                SDVariable add = sameDiff.getVariableForVertexId(differentialFunction.resultVertexId());
 
                                 if (isDebugMode()) {
                                     if (add.gradient() != null)
@@ -3744,17 +3306,6 @@ public class SameDiff {
                                 }
                             }
 
-                            else {
-                                SDVariable forwardVar = sameDiff.getVertexIdToVariable().get(x.resultVertexId());
-                                SDVariable grad = forwardVar.gradient();
-                                grad.setVertexId(differentialFunction.resultVertexId());
-                                grad.setDifferentialFunction(differentialFunction);
-                                sameDiff.getVertexIdToVariable().put(differentialFunction.resultVertexId(),grad);
-                                Op func = (Op) differentialFunction;
-                                grad.setVarName(sameDiff.generateVariableName(func.name(),
-                                        true,
-                                        differentialFunction));
-                            }
                         }
 
                         if(isDebugMode()) {
@@ -3772,11 +3323,7 @@ public class SameDiff {
                     }
 
 
-                    return new   SDVariable[] {SDVariable.builder()
-                            .differentialFunction(opOrder.get(0).getOpState().getDifferentialFunction())
-                            .sameDiff(sameDiff)
-                            .varName("grad")
-                            .build()};
+                    return new   SDVariable[] {sameDiff.var("grad",new int[] {1,1})};
                 }
             });
 
@@ -3813,7 +3360,6 @@ public class SameDiff {
      * @return
      */
     public Pair<Map<SDVariable,DifferentialFunction>,List<DifferentialFunction>> exec() {
-        allocate();
         List<DifferentialFunction> ops = new ArrayList<>();
         List<OpExecAction> opExecActions = graph().getOpOrder().getActions();
 
@@ -3827,8 +3373,10 @@ public class SameDiff {
                 onBackward = true;
             }
 
+            if(opExecAction.getOpState().getOpName().equals(new GradientBackwardsMarker().name()))
+                continue;
+
             DifferentialFunction differentialFunction = createOp(
-                    opExecAction.getOpState().getOpType(),
                     opExecAction);
             if(differentialFunction instanceof If) {
                 If ifOp = (If) differentialFunction;
@@ -3914,38 +3462,46 @@ public class SameDiff {
                 ops.add(differentialFunction);
 
 
-                SDVariable currVariable = getVertexIdToVariable().get(opExecAction.getOutputId());
+                SDVariable currVariable = getVariableForVertexId(opExecAction.getOutputId());
                 if(currVariable ==  null) {
                     List<SDVariable> functions = new ArrayList<>(opExecAction.getInputsIds().length);
                     SDVariable add = SDVariable.builder()
-                            .differentialFunction(opExecAction.getOpState().getDifferentialFunction())
                             .sameDiff(this)
                             .varName(!functions.isEmpty() ? generateVariableName(opExecAction.getOpState().getOpName(),true,
                                     functions.toArray(new SDVariable[functions.size()])) : opExecAction.getOpState().getOpName() + "-" + UUID.randomUUID().toString())
-                            .arr(op.z())
                             .shape(op.z().shape())
                             .vertexId(opExecAction.getOutputId())
                             .build();
+
                     addVariable(add);
                     currVariable = add;
 
                 }
                 else
+                     associateArrayWithVariable(op.z(),currVariable);
 
-                    currVariable.setArr(op.z());
                 opMap.put(currVariable,differentialFunction);
-                getVertexToArray().put(opExecAction.getOutput().getVarName(),op.z());
-                getFunctionInstances().put(opExecAction.getOutputId(),opExecAction.getOpState().getDifferentialFunction());
+                putFunction(opExecAction.getOutputId(),differentialFunction);
             }
 
         }
 
-
-
-
-
-
         return new Pair<>(opMap,ops);
     }
+
+
+    /**
+     * Update the name for the variable
+     * with the given vertex id
+     * @param vertexId the vertex id to update
+     * @param withName thew new name
+     */
+    public void updateVariableName(int[] vertexId,String withName) {
+        SDVariable oldVarNameRef = getVariableForVertexId(vertexId);
+        variableMap.remove(oldVarNameRef.getVarName());
+        variableMap.put(withName,oldVarNameRef);
+
+    }
+
 
 }

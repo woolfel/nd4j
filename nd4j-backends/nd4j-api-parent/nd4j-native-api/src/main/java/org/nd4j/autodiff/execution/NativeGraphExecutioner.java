@@ -12,7 +12,7 @@ import org.nd4j.autodiff.opstate.OpExecAction;
 import org.nd4j.autodiff.opstate.OpState;
 import org.nd4j.autodiff.samediff.SDGraph;
 import org.nd4j.autodiff.samediff.SameDiff;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
+import org.nd4j.autodiff.samediff.SDVariable;
 import org.nd4j.graph.*;
 import org.nd4j.linalg.api.memory.pointers.PagedPointer;
 import org.nd4j.linalg.api.ndarray.INDArray;
@@ -111,7 +111,7 @@ public class NativeGraphExecutioner implements GraphExecutioner {
 
             // each of inputs can be either external variable, or another node
             for (int in: ins) {
-                SDVariable state = action.getOutput();
+                SDVariable state = sd.getVariableForVertexId(action.getOutputId());
 
                 int[] realIn;
                 if (state != null && mappedVariables.containsKey(state.getVarName())) {
@@ -228,7 +228,7 @@ public class NativeGraphExecutioner implements GraphExecutioner {
         FlatResult fr = FlatResult.getRootAsFlatResult(pagedPointer.asBytePointer().asByteBuffer());
 
 
-        log.info("VarMap: {}", sd.getVariableMap());
+        log.info("VarMap: {}", sd.variableMap());
 
         INDArray[] results = new INDArray[fr.variablesLength()];
 
@@ -256,22 +256,23 @@ public class NativeGraphExecutioner implements GraphExecutioner {
             INDArray val = Nd4j.create(values, _shape, _order, 0);
             results[e] = val;
 
-            if (var.name() != null && sd.getVariableMap().containsKey(var.name())) {
-                //log.info("VarName: {}; Exists: {}; NDArrayInfo: {};", var.name(), sd.getVariableMap().containsKey(var.name()), sd.getVertexToArray().containsKey(var.name()));
-                sd.getVariableMap().get(var.name()).setArr(val);
+            if (var.name() != null && sd.variableMap().containsKey(var.name())) {
+                //log.info("VarName: {}; Exists: {}; NDArrayInfo: {};", var.name(), sd.variableMap().containsKey(var.name()), sd.getVertexToArray().containsKey(var.name()));
+                sd.associateArrayWithVariable(val, sd.variableMap().get(var.name()));
+
             } else {
                 int[] original = intermediate.get(var.id()).getOriginalOutput();
                 //log.info("Original id: {}; out: {}; out2: {}", original, sd.getVertexIdxToInfo().get(original), graph.getVariableForVertex(original));
-                if (sd.getVariableMap().get(sd.getGraph().getVariableForVertex(original[0]).getVarName()) != null) {
-                    sd.getVariableMap().get(sd.getGraph().getVariableForVertex(original[0]).getVarName()).setArr(val);
+                if (sd.variableMap().get(sd.getGraph().getVariableForVertex(original[0]).getVarName()) != null) {
+                    sd.associateArrayWithVariable(val,sd.variableMap().get(sd.getGraph().getVariableForVertex(original[0]).getVarName()));
                 } else {
                     SDVariable variable = SDVariable.builder()
-                            .arr(val)
                             .varName(sd.getGraph().getVariableForVertex(original[0]).getVarName())
                             .shape(val.shape())
                             .sameDiff(sd)
                             .build();
 
+                    sd.associateArrayWithVariable(val,variable);
                     sd.addVariable(variable);
                 }
             }
@@ -309,7 +310,7 @@ public class NativeGraphExecutioner implements GraphExecutioner {
         for (OpExecAction action: ops) {
             log.info("Action: {}", action);
             NDArrayInformation out = action.getOutput();
-            SDVariable sdOut = sd.getVariableMap().get(out.getId());
+            SDVariable sdOut = sd.variableMap().get(out.getId());
 
             // output of this operation is declared variable
             if (sdOut != null && sdOut.getId() < 0) {
@@ -335,7 +336,7 @@ public class NativeGraphExecutioner implements GraphExecutioner {
         for (OpExecAction action: ops) {
 
             for (NDArrayInformation var: action.getInputs()) {
-                SDVariable sdVar = sd.getVariableMap().get(var.getId());
+                SDVariable sdVar = sd.variableMap().get(var.getId());
 
                 log.info("Var: {}; Mapping {} to node: {}", var.getId(), vertexMapS.get(var.getId()), nodesCount);
 
@@ -362,7 +363,7 @@ public class NativeGraphExecutioner implements GraphExecutioner {
             int varsCount = 0;
             // fetching input vars first
             for (NDArrayInformation var: action.getInputs()) {
-                SDVariable sdVar = sd.getVariableMap().get(var.getId());
+                SDVariable sdVar = sd.variableMap().get(var.getId());
 
                 // negative ID assumes pre-created array
                 if (sdVar !=  null && sdVar.getId() < 0) {

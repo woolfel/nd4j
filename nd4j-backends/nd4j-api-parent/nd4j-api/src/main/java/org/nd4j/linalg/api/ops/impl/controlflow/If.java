@@ -7,11 +7,12 @@ import org.nd4j.autodiff.functions.DifferentialFunction;
 import org.nd4j.autodiff.opstate.NDArrayVertex;
 import org.nd4j.autodiff.opstate.OpState;
 import org.nd4j.autodiff.samediff.SameDiff;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
+import org.nd4j.autodiff.samediff.SDVariable;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.CustomOp;
 import org.nd4j.linalg.api.ops.Op;
 import org.nd4j.linalg.primitives.Pair;
+import org.nd4j.weightinit.impl.ZeroInitScheme;
 
 import java.util.*;
 
@@ -67,21 +68,14 @@ public class If extends DifferentialFunction implements CustomOp {
         this.trueBody = trueBody;
         this.falseBody = falseBody;
         this.blockName = blockName;
-        this.vertexId = new int[] {parent.graph().nextVertexId()};
-        this.dummyResult = SDVariable.builder()
-        .varName("dummyresult-" + UUID.randomUUID().toString())
-                .sameDiff(parent).shape(new int[]{1,1}).vertexId(vertexId)
-                .build();
-
-        NDArrayVertex dummyVertex = new NDArrayVertex(parent,this.vertexId[0],0,dummyResult);
-        dummyResult.setVertex(dummyVertex);
-        parent.graph().addVertex(dummyVertex);
-        this.vertex = dummyVertex;
+        int[] vertexId = {parent.graph().nextVertexId()};
+        this.dummyResult =  parent.var("dummyresult-" + UUID.randomUUID().toString(),new int[]{1,1},new ZeroInitScheme('f'),vertexId,0);
+        this.vertexId = vertexId;
         int[] inputEdges = new int[inputVars.length];
         String[] opEdgeIds = new String[inputVars.length * 2];
 
         for(int i = 0; i < inputEdges.length; i++) {
-            inputEdges[i] = inputVars[i].getVertex().vertexID();
+            inputEdges[i] = inputVars[i].getVertexId()[0];
         }
 
         /**
@@ -110,16 +104,15 @@ public class If extends DifferentialFunction implements CustomOp {
         this.loopBodyExecution = parent.defineFunction(trueBodyName,trueBody,inputVars);
         this.falseBodyExecution = parent.defineFunction(falseBodyName,falseBody,inputVars);
         parent.defineFunction(blockName,conditionBody,inputVars);
-        parent.getSameDiffFunctionInstances().put("predicate-eval-body",sameDiff);
+        parent.putSubFunction("predicate-eval-body-" + UUID.randomUUID().toString(),sameDiff);
         //get a reference to the actual loop body
         this.loopBodyExecution = parent.getFunction(trueBodyName);
+        parent.putFunction(vertexId,this);
 
         OpState opState = OpState.builder()
                 .opName(opName())
                 .opType(Op.Type.CONDITIONAL)
-                .differentialFunction(this)
                 .inPlace(false)
-                .results(new SDVariable[]{dummyResult})
                 .id(UUID.randomUUID().toString())
                 .vertexIds(opEdgeIds)
                 .build();
@@ -140,10 +133,6 @@ public class If extends DifferentialFunction implements CustomOp {
             this.trueBodyExecuted = false;
     }
 
-    @Override
-    public NDArrayVertex getVertex() {
-        return vertex;
-    }
 
     @Override
     public List<DifferentialFunction> doDiff(List<DifferentialFunction> f1) {

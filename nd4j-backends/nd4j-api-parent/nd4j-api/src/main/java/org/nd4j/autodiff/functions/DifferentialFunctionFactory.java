@@ -6,7 +6,7 @@ import lombok.Data;
 import org.nd4j.autodiff.opstate.NDArrayVertex;
 import org.nd4j.autodiff.opstate.OpState;
 import org.nd4j.autodiff.samediff.SameDiff;
-import org.nd4j.autodiff.samediff.impl.SDVariable;
+import org.nd4j.autodiff.samediff.SDVariable;
 import org.nd4j.linalg.api.blas.params.MMulTranspose;
 import org.nd4j.linalg.api.ops.Op;
 import org.nd4j.linalg.api.ops.impl.accum.Max;
@@ -25,7 +25,9 @@ import org.nd4j.linalg.api.ops.impl.transforms.comparison.*;
 import org.nd4j.linalg.api.ops.impl.transforms.gradient.*;
 import org.nd4j.linalg.api.ops.impl.transforms.gradient.SigmoidDerivative;
 import org.nd4j.linalg.api.shape.Shape;
+import org.nd4j.linalg.exception.ND4JIllegalStateException;
 import org.nd4j.linalg.util.ArrayUtil;
+import org.nd4j.weightinit.impl.ZeroInitScheme;
 
 import java.lang.reflect.Method;
 import java.util.*;
@@ -96,13 +98,13 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
     }
 
     @Override
-    public Zero zero(int[] shape) {
-        return sameDiff().setupFunction(new Zero(sameDiff(),shape,new int[]{sameDiff().graph().nextVertexId()}));
+    public SDVariable zero(int[] shape) {
+        return sameDiff().setupFunction(sameDiff.zero("one-" + UUID.randomUUID().toString(),shape));
     }
 
     @Override
-    public Ones one(int[] shape) {
-        return sameDiff().setupFunction(new Ones(sameDiff(),shape,new int[]{ sameDiff.graph().nextVertexId()}));
+    public SDVariable one(int[] shape) {
+        return sameDiff().setupFunction(sameDiff.one("one-" + UUID.randomUUID().toString(),shape));
     }
 
     @Override
@@ -420,7 +422,7 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
 
     @Override
     public DifferentialFunction sigmoidDerivative(DifferentialFunction iX, DifferentialFunction wrt) {
-        return sameDiff().setupFunction(new SigmoidDerivative(sameDiff(),sameDiff().setupFunction(iX),sameDiff().setupFunction(wrt)));
+        return sameDiff().setupFunction(new SigmoidDerivative(sameDiff(),iX,wrt));
     }
 
     @Override
@@ -431,7 +433,7 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
 
     @Override
     public DifferentialFunction swishDerivative(DifferentialFunction iX, DifferentialFunction wrt) {
-        return sameDiff().setupFunction(new SwishDerivative(sameDiff(),sameDiff().setupFunction(iX),sameDiff().setupFunction(wrt)));
+        return sameDiff().setupFunction(new SwishDerivative(sameDiff(),iX,wrt));
     }
 
 
@@ -964,7 +966,10 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
     /**
      * Adds function edges to the same diff graph
      * based on inputs and the current target op.
-     * @param op the
+     * Note that the op *must* have a vertex id defined.
+     * If not, an {@link ND4JIllegalStateException}
+     * is thrown
+     * @param op the operation to add edges to
      */
     public void addFunctionEdges(DifferentialFunction op) {
         DifferentialFunction[] inputs = op.args();
@@ -973,7 +978,20 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
             validateDifferentialFunctionGraph(input);
         }
 
+        if(op.vertexId == null) {
+            throw new ND4JIllegalStateException("Op must have a vertex id defined!");
+        }
 
+
+        /**
+         * Note here that we need to ensure the vertex is properly added.
+         * The output variable creation can create skipped vertices.
+         */
+        if(sameDiff.graph().getVertex(op.vertexId[0]) == null) {
+            SDVariable var = sameDiff.var(op.opName() + "-" + UUID.randomUUID().toString(),op.shape,new ZeroInitScheme('f'),op.vertexId,0);
+            NDArrayVertex ndArrayVertex = new NDArrayVertex(sameDiff,op.vertexId[0],0,var);
+            sameDiff.graph().addVertex(ndArrayVertex);
+        }
 
         String opName = op.opName();
 
@@ -982,26 +1000,43 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
         List<Integer> inputIdsList = new ArrayList<>();
         for (int i = 0; i < inputs.length; i++) {
             DifferentialFunction differentialFunction = inputs[i];
-            List<DifferentialFunction> outputs = differentialFunction.outputs();
-            for (DifferentialFunction output : outputs) {
-                for (int vertexId : output.getOutputVertexIds()) {
-                    if (!inputIdsList.contains(vertexId))
-                        inputIdsList.add(vertexId);
+            if(differentialFunction instanceof SDVariable || differentialFunction.outputs().size() == 1 && differentialFunction.outputs().get(0) == differentialFunction) {
+                inputIdsList.addAll(Ints.asList(differentialFunction.vertexId));
+            }
+            else {
+                List<DifferentialFunction> outputs = differentialFunction.outputs();
+                for (DifferentialFunction output : outputs) {
+                    if(output == differentialFunction)
+                        continue;
+                    for (int vertexId : output.getOutputVertexIds()) {
+                        if (!inputIdsList.contains(vertexId))
+                            inputIdsList.add(vertexId);
+                    }
                 }
             }
 
+
         }
 
-        NDArrayVertex[] outputs = new NDArrayVertex[outputShapes.size()];
+
+        /**
+         * Need to do something about in place operations.
+         * Due to how variables are handled, we need to make sure array references are updated properly.
+         *
+         */
         DifferentialFunction[] outputFunctions = new DifferentialFunction[outputShapes.size()];
         SDVariable[] resultInfo = new SDVariable[outputShapes.size()];
-        for (int i = 0; i < outputShapes.size(); i++) {
-            SDVariable variable = sameDiff.var(sameDiff.generateVariableName(opName, false),outputShapes.get(i));
-            outputVertexIds[i] = variable.getVertex().vertexID();
-            resultInfo[i] = variable;
-            outputs[i] = variable.getVertex();
-            outputFunctions[i] = variable;
+        if(outputShapes.size() > 1) {
+            throw new ND4JIllegalStateException("Automatically generating edges assumes *only* 1 output for now. Consider using DynamicCustomOp for multi output");
         }
+        for (int i = 0; i < outputShapes.size(); i++) {
+            SDVariable variable = sameDiff.var(sameDiff.generateVariableName(opName, false,op.args()),outputShapes.get(i),new ZeroInitScheme('f'),op.getVertexId(),op.depth());
+            outputVertexIds[i] = variable.getVertexId()[0];
+            resultInfo[i] = variable;
+            outputFunctions[i] = variable;
+
+        }
+
 
         int[] inputIds = Ints.toArray(inputIdsList);
 
@@ -1010,12 +1045,10 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
         String[] vertexIds = sameDiff.generateVertexIds(Ints.concat(inputIds, outputVertexIds));
         OpState opState = OpState.builder()
                 .opType(opType).inPlace(op.isInPlace())
-                .differentialFunction(op)
                 .opName(opName)
                 .id(opName + "(" + vertexIds + ")")
                 .vertexIds(sameDiff.generateVertexIds(Ints.concat(inputIds, outputVertexIds)))
                 .extraArgs(op.getExtraArgs())
-                .results(resultInfo)
                 .build();
 
 
@@ -1050,7 +1083,7 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
         Preconditions.checkState(function.getSameDiff() ==
                         this.getSameDiff(),
                 "Function applications must be contained " +
-                        "in same sameDiff. The left " + function +"" +
+                        "in same sameDiff. The left " + function  +
                         " must match this function " + this);
         Preconditions.checkState(sameDiff ==
                 this.getSameDiff(),"Function applications m" +
@@ -1079,9 +1112,11 @@ public class DifferentialFunctionFactory implements FunctionFactory  {
 
 
     public void validateFunctionReference(DifferentialFunction reference) {
-        if(sameDiff.getFunctionInstances().containsKey(reference.getVertexId())) {
-            DifferentialFunction get = sameDiff.getFunctionInstances()
-                    .get(reference.getVertexId());
+        if(reference instanceof SDVariable)
+            return;
+
+        if(sameDiff.getFunctionForVertexId(reference.getVertexId()) != null) {
+            DifferentialFunction get = sameDiff.getFunctionForVertexId(reference.getVertexId());
             Preconditions.checkState(reference.equals(get), "Found invalid reference " + reference + " for vertex id "
                     + reference.getVertexId());
         }

@@ -36,6 +36,7 @@ public abstract class ShapeOp extends BaseOp {
             this.args = new DifferentialFunction[] {sameDiff.setupFunction(i_v)};
             f().validateFunctionReference(i_v);
             f().validateDifferentialFunctionsameDiff(i_v);
+            addAsNewVertexId();
             f().addFunctionEdges(this);
         } else {
             throw new IllegalArgumentException("Input not null variable.");
@@ -61,6 +62,11 @@ public abstract class ShapeOp extends BaseOp {
         List<int[]> ret = new ArrayList<>();
         ret.add(shape);
         return ret;
+    }
+
+    @Override
+    public Type opType() {
+        return Type.SHAPE;
     }
 
     /**
