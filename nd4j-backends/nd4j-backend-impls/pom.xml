@@ -83,16 +83,16 @@
                             </configuration>
                         </execution>
                         <execution>
-                            <id>${javacpp.platform}</id>
+                            <id>${javacpp.platform}${javacpp.extension}</id>
                             <phase>package</phase>
                             <goals>
                                 <goal>jar</goal>
                             </goals>
                             <configuration>
-                                <classifier>${javacpp.platform}</classifier>
+                                <classifier>${javacpp.platform}${javacpp.extension}</classifier>
                                 <skipIfEmpty>true</skipIfEmpty>
                                 <includes>
-                                    <include>org/nd4j/nativeblas/${javacpp.platform}/*</include>
+                                    <include>org/nd4j/nativeblas/${javacpp.platform}${javacpp.extension}/*</include>
                                     <include>lib/**</include>
                                 </includes>
                             </configuration>
