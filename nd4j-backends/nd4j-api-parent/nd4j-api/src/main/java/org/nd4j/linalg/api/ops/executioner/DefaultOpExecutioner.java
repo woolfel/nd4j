@@ -20,9 +20,9 @@
 package org.nd4j.linalg.api.ops.executioner;
 
 import lombok.extern.slf4j.Slf4j;
+import lombok.val;
 import org.nd4j.linalg.api.buffer.DataBuffer;
 import org.nd4j.linalg.api.complex.IComplexNDArray;
-import org.nd4j.linalg.api.complex.IComplexNumber;
 import org.nd4j.linalg.api.environment.Nd4jEnvironment;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.*;
@@ -34,7 +34,6 @@ import org.nd4j.linalg.cache.TADManager;
 import org.nd4j.linalg.exception.ND4JIllegalStateException;
 import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.profiler.OpProfiler;
-import org.nd4j.linalg.util.ArrayUtil;
 
 import java.util.List;
 import java.util.Map;
@@ -291,47 +290,6 @@ public class DefaultOpExecutioner implements OpExecutioner {
 
     @Override
     public INDArray exec(Accumulation op, int... dimension) {
-        //do op along all dimensions
-        if (dimension.length == op.x().rank())
-            dimension = new int[] {Integer.MAX_VALUE};
-
-        if (op.isPassThrough()) {
-            op.exec(dimension);
-            return op.z();
-        }
-
-
-        if (dimension[0] == Integer.MAX_VALUE) {
-            if (op.x() instanceof IComplexNDArray)
-                return Nd4j.scalar(execAndReturn(op).getFinalResultComplex());
-            return Nd4j.scalar(execAndReturn(op).getFinalResult().doubleValue());
-        }
-
-        if (op instanceof IComplexNDArray) {
-            int[] retShape = ArrayUtil.removeIndex(op.x().shape(), dimension);
-            //ensure vector is proper shape
-            if (retShape.length == 1) {
-                if (dimension[0] == 0)
-                    retShape = new int[] {1, retShape[0]};
-                else
-                    retShape = new int[] {retShape[0], 1};
-            } else if (retShape.length == 0) {
-                retShape = new int[] {1, 1};
-            }
-
-            IComplexNDArray ret = Nd4j.createComplex(retShape);
-            for (int i = 0; i < op.x().tensorssAlongDimension(dimension); i++) {
-                Op op2 = op.opForDimension(i, dimension);
-                IComplexNumber result = execAndReturn((Accumulation) op2).getFinalResultComplex();
-                ret.putScalar(i, result);
-            }
-
-            // FIXME: this is wrong, it breaks shapeInfo immutability
-            if (ret.ordering() == 'c')
-                ret.setStride(ArrayUtil.reverseCopy(ret.stride()));
-
-            return ret;
-        }
 
         throw new UnsupportedOperationException("Java computation no longer supported");
     }
@@ -462,6 +420,32 @@ public class DefaultOpExecutioner implements OpExecutioner {
         return System.nanoTime();
     }
 
+    protected void checkForWorkspaces(Op op) {
+        val x = op.x();
+        if (x.isAttached()) {
+            val ws = x.data().getParentWorkspace();
+
+            if (!ws.isScopeActive())
+                throw new ND4JIllegalStateException("Op [" + op.opName() +"] X argument uses leaked workspace pointer");
+        }
+
+        val y = op.y();
+        if (y != null && x.isAttached()) {
+            val ws = y.data().getParentWorkspace();
+
+            if (!ws.isScopeActive())
+                throw new ND4JIllegalStateException("Op [" + op.opName() +"] Y argument uses leaked workspace pointer");
+        }
+
+        val z = op.z();
+        if (z != null && z.isAttached()) {
+            val ws = z.data().getParentWorkspace();
+
+            if (!ws.isScopeActive())
+                throw new ND4JIllegalStateException("Op [" + op.opName() +"] Z argument uses leaked workspace pointer");
+        }
+    }
+
     public long profilingHookIn(Op op) {
         switch (profilingMode) {
             case ALL:
@@ -472,6 +456,9 @@ public class DefaultOpExecutioner implements OpExecutioner {
             case OPERATIONS:
                 OpProfiler.getInstance().processOpCall(op);
                 break;
+            case SCOPE_PANIC:
+                checkForWorkspaces(op);
+                return 0L;
             case DISABLED:
             default:
                 return 0L;
