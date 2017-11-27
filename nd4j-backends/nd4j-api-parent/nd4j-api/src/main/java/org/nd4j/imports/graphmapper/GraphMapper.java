@@ -267,6 +267,15 @@ public interface GraphMapper<GRAPH_TYPE,NODE_TYPE,ATTR_TYPE,TENSOR_TYPE> {
     List<NODE_TYPE> getNodeList(GRAPH_TYPE graphType);
 
 
+
+    /**
+     * Import a graph as same diff
+     * from the given file
+     * @param graphFile
+     * @return
+     */
+    SameDiff importGraph(InputStream graphFile);
+
     /**
      * Import a graph as same diff
      * from the given file

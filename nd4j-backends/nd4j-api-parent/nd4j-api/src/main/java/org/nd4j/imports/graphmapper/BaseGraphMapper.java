@@ -53,18 +53,20 @@ public abstract class BaseGraphMapper<GRAPH_TYPE,NODE_TYPE,ATTR_TYPE,TENSOR_TYPE
 
     }
 
+
+
     /**
      *
-     * @param graphFile
+     * @param inputStream
      * @return
      */
     @Override
-    public  SameDiff importGraph(File graphFile) {
+    public  SameDiff importGraph(InputStream inputStream) {
         GRAPH_TYPE def = null;
-        try (FileInputStream fis = new FileInputStream(graphFile); BufferedInputStream bis = new BufferedInputStream(fis)) {
+        try ( BufferedInputStream bis = new BufferedInputStream(inputStream)) {
             def = parseGraphFrom(bis);
         } catch (Exception e) {
-            try (FileInputStream fis2 = new FileInputStream(graphFile); BufferedInputStream bis2 = new BufferedInputStream(fis2); BufferedReader reader = new BufferedReader(new InputStreamReader(bis2))) {
+            try (BufferedInputStream bis2 = new BufferedInputStream(inputStream); BufferedReader reader = new BufferedReader(new InputStreamReader(bis2))) {
                 Message.Builder builder = getNewGraphBuilder();
 
                 StringBuilder str = new StringBuilder();
@@ -78,6 +80,26 @@ public abstract class BaseGraphMapper<GRAPH_TYPE,NODE_TYPE,ATTR_TYPE,TENSOR_TYPE
             } catch (Exception e2) {
                 e2.printStackTrace();
             }
+        }
+
+
+
+        return importGraph(def);
+    }
+
+    /**
+     *
+     * @param graphFile
+     * @return
+     */
+    @Override
+    public  SameDiff importGraph(File graphFile) {
+        GRAPH_TYPE def = null;
+        try (FileInputStream fis = new FileInputStream(graphFile)) {
+            return importGraph(fis);
+        } catch (Exception e) {
+            e.printStackTrace();
+
         }
 
         if (def == null)
