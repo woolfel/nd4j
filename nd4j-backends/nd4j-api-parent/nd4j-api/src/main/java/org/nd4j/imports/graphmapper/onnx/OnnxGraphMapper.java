@@ -139,12 +139,31 @@ public class OnnxGraphMapper extends BaseGraphMapper<OnnxProto3.GraphProto, Onnx
         if(differentialFunction == null) {
             throw new NoOpNameFoundException("No op name found " + tfNode.getOpType());
         }
+
         val diff = importState.getSameDiff();
         val idx = importState.getGraph().getNodeList().indexOf(tfNode);
         val name = !tfNode.getName().isEmpty() ? tfNode.getName() : String.valueOf(idx);
         try {
             val newInstance = differentialFunction.getClass().newInstance();
-            newInstance.initFromOnnx(tfNode,diff,getAttrMap(tfNode),importState.getGraph());
+            val args = new DifferentialFunction[tfNode.getInputCount()];
+            for(int i = 0; i < tfNode.getInputCount(); i++) {
+                val  initialVertexId = importState.getVertexIdMap().get(name);
+                int[] vertexIdKey = initialVertexId == null ? diff.getVariable(name).getVertexId() : initialVertexId.getRight();
+                if(vertexIdKey == null) {
+                    throw new ND4JIllegalStateException("Unable set to set arg for op " + tfNode.getName());
+                }
+
+                DifferentialFunction func = diff.getFunctionForVertexId(vertexIdKey);
+                if(func == null) {
+                    func =  diff.getVariable(name);
+                }
+
+                args[i] = func;
+            }
+
+            diff.associateFunctionsAsArgs(args,newInstance);
+
+
             val indices = importState.getVertexIdMap().get(name);
             val opStateEdge = getOpStateEdge(indices.getFirst(),indices.getSecond(),tfNode);
             newInstance.setVertexId(indices.getRight());
@@ -154,9 +173,10 @@ public class OnnxGraphMapper extends BaseGraphMapper<OnnxProto3.GraphProto, Onnx
              * Need to f
              */
             diff.graph().addEdge(opStateEdge);
-        } catch (InstantiationException e) {
-            e.printStackTrace();
-        } catch (IllegalAccessException e) {
+            newInstance.initFromOnnx(tfNode,diff,getAttrMap(tfNode),importState.getGraph());
+
+        }
+        catch (Exception e) {
             e.printStackTrace();
         }
 

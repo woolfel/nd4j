@@ -125,6 +125,8 @@ public abstract class BaseGraphMapper<GRAPH_TYPE,NODE_TYPE,ATTR_TYPE,TENSOR_TYPE
             if(arr != null) {
                 val var = importState.getSameDiff().var(entry.getKey(),arr);
                 indexMap.put(entry.getKey(),var.getVertexId()[0]);
+                //ensure the array is made available for later processing
+                diff.associateArrayWithVariable(arr,var);
             }
             else if(getShapeFromTensor(entry.getValue()) == null) {
                 val var = importState.getSameDiff().var(entry.getKey(),null,0);
